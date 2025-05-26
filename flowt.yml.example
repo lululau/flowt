@@ -1,0 +1,35 @@
+# Aliyun DevOps Pipelines TUI 配置文件示例
+# 请将此文件复制到 ~/.config/flowt.yml 并填入正确的值
+
+# 企业 ID（组织 ID）- 必填
+# 可在阿里云云效控制台中找到
+organization_id: "your_organization_id_here"
+
+# ===== 推荐认证方式：个人访问令牌 =====
+# 根据阿里云云效文档，个人访问令牌是推荐的认证方式
+# 获取方法：https://help.aliyun.com/zh/yunxiao/developer-reference/obtain-personal-access-token
+
+# 个人访问令牌 - 推荐使用
+personal_access_token: "your_personal_access_token_here"
+
+# 云效服务接入点 - 可选，默认为 openapi-rdc.aliyuncs.com
+# 参考：https://help.aliyun.com/zh/yunxiao/developer-reference/service-access-point-domain
+endpoint: "openapi-rdc.aliyuncs.com"
+
+# ===== 备用认证方式：AccessKey =====
+# 如果没有个人访问令牌，可以使用AccessKey认证
+# 可在阿里云控制台的访问控制 (RAM) 中创建
+
+# 阿里云访问密钥 - 备用方式
+# access_key_id: "your_access_key_id_here"
+# access_key_secret: "your_access_key_secret_here"
+
+# 区域 ID - 仅在使用AccessKey认证时需要，默认为 cn-hangzhou
+# 支持的区域: cn-hangzhou, cn-beijing, cn-shanghai, cn-shenzhen 等
+# region_id: "cn-hangzhou"
+
+# 注意事项：
+# 1. 请妥善保管您的访问凭证，不要将其提交到公共代码仓库
+# 2. 建议定期轮换访问凭证以提高安全性
+# 3. 确保访问凭证具有云效 DevOps 相关的权限
+# 4. 个人访问令牌相比AccessKey更安全，建议优先使用 

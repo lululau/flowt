@@ -1,6 +1,6 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
 # Build and Deployment Guide
@@ -24,40 +24,32 @@ Instructions for building, running, and deploying the Aliyun DevOps Pipelines TU
 ### Local Development Build
 ```bash
 # Build for current platform
-go build -o aliyun-pipelines-tui ./cmd/aliyun-pipelines-tui
+go build -o flowt ./cmd/aliyun-pipelines-tui
 
 # Build with debug information
-go build -gcflags="all=-N -l" -o aliyun-pipelines-tui-debug ./cmd/aliyun-pipelines-tui
+go build -gcflags="all=-N -l" -o flowt-debug ./cmd/aliyun-pipelines-tui
 ```
 
 ### Cross-Platform Builds
 ```bash
 # Build for Linux
-GOOS=linux GOARCH=amd64 go build -o aliyun-pipelines-tui-linux ./cmd/aliyun-pipelines-tui
+GOOS=linux GOARCH=amd64 go build -o flowt-linux ./cmd/aliyun-pipelines-tui
 
 # Build for Windows
-GOOS=windows GOARCH=amd64 go build -o aliyun-pipelines-tui.exe ./cmd/aliyun-pipelines-tui
+GOOS=windows GOARCH=amd64 go build -o flowt.exe ./cmd/aliyun-pipelines-tui
 
 # Build for macOS
-GOOS=darwin GOARCH=amd64 go build -o aliyun-pipelines-tui-macos ./cmd/aliyun-pipelines-tui
+GOOS=darwin GOARCH=amd64 go build -o flowt-macos ./cmd/aliyun-pipelines-tui
 ```
 
 ### Optimized Production Build
 ```bash
 # Build with optimizations and reduced binary size
-go build -ldflags="-s -w" -o aliyun-pipelines-tui ./cmd/aliyun-pipelines-tui
+go build -ldflags="-s -w" -o flowt ./cmd/aliyun-pipelines-tui
 ```
 
 ## Running the Application
 
-### Environment Setup
-Create a `.env` file or export environment variables:
-```bash
-export ALICLOUD_ACCESS_KEY_ID="your-access-key-id"
-export ALICLOUD_ACCESS_KEY_SECRET="your-access-key-secret"
-export ALICLOUD_DEVOPS_ORG_ID="your-organization-id"
-export ALICLOUD_REGION_ID="cn-hangzhou"  # Optional, defaults to cn-hangzhou
-```
 
 ### Direct Execution
 ```bash

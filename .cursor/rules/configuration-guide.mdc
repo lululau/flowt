@@ -1,0 +1,136 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Configuration Guide
+
+This guide explains how to configure the Aliyun DevOps Pipelines TUI application.
+
+## Configuration File Location
+
+The application reads configuration from `~/.config/flowt.yml`. This file must be created manually before running the application.
+
+## Configuration Format
+
+See [flowt.yml.example](mdc:flowt.yml.example) for a complete example. The configuration uses YAML format:
+
+```yaml
+# Required field
+organization_id: "your_organization_id"
+
+# Recommended: Personal Access Token Authentication
+personal_access_token: "your_personal_access_token"
+endpoint: "openapi-rdc.aliyuncs.com"  # Optional, defaults to this value
+
+# Alternative: AccessKey Authentication (fallback)
+# access_key_id: "your_access_key_id"  
+# access_key_secret: "your_access_key_secret"
+# region_id: "cn-hangzhou"  # Optional, defaults to cn-hangzhou
+```
+
+## Authentication Methods
+
+### Recommended: Personal Access Token Authentication
+
+The application now supports personal access token authentication, which is the recommended method according to [Aliyun DevOps documentation](mdc:https:/help.aliyun.com/zh/yunxiao/developer-reference/obtain-personal-access-token).
+
+**Configuration:**
+- `personal_access_token` - Your personal access token from Aliyun DevOps
+- `endpoint` - Service endpoint (optional, defaults to "openapi-rdc.aliyuncs.com")
+- `organization_id` - Your DevOps organization ID
+
+**How to obtain a personal access token:**
+1. Visit the [Aliyun DevOps documentation](mdc:https:/help.aliyun.com/zh/yunxiao/developer-reference/obtain-personal-access-token)
+2. Log into Aliyun DevOps Console
+3. Go to Personal Settings → Access Tokens
+4. Create a new token with appropriate permissions
+5. Copy the token value to your configuration
+
+**Benefits of Personal Access Tokens:**
+- More secure than AccessKeys
+- Granular permission control
+- Can be easily revoked
+- Recommended by Aliyun for API access
+- No need to manage regions
+
+### Fallback: AccessKey Authentication
+
+The application also supports traditional AccessKey authentication as implemented in [internal/api/client.go](mdc:internal/api/client.go).
+
+**Configuration:**
+- `access_key_id` - Your Aliyun access key ID
+- `access_key_secret` - Your Aliyun access key secret
+- `region_id` - Region (optional, defaults to "cn-hangzhou")
+- `organization_id` - Your DevOps organization ID
+
+**How to obtain AccessKey credentials:**
+1. **Access Keys**: Create in Aliyun Console → AccessKey Management
+2. **Organization ID**: Find in Aliyun DevOps Console → Organization Settings
+
+## Configuration Validation
+
+The application validates configuration in [cmd/aliyun-pipelines-tui/main.go](mdc:cmd/aliyun-pipelines-tui/main.go):
+
+1. **File Existence**: Checks if `~/.config/flowt.yml` exists
+2. **YAML Parsing**: Validates YAML syntax
+3. **Required Fields**: Ensures all required fields are present
+4. **Field Values**: Checks that required fields are not empty
+
+## Security Best Practices
+
+### Protecting Credentials
+- Never commit configuration files with real credentials to version control
+- Use restrictive file permissions: `chmod 600 ~/.config/flowt.yml`
+- Store credentials securely and rotate them regularly
+
+### Configuration File Security
+```bash
+# Set secure permissions on configuration file
+chmod 600 ~/.config/flowt.yml
+
+# Verify permissions
+ls -la ~/.config/flowt.yml
+# Should show: -rw------- (600 permissions)
+```
+
+## Troubleshooting Configuration Issues
+
+### Common Errors
+
+**"configuration file not found"**
+- Create `~/.config/flowt.yml` using the example template
+- Ensure the file path is correct (note the dot prefix in `.config`)
+
+**"failed to parse config file"**
+- Check YAML syntax (indentation, colons, quotes)
+- Ensure no tabs are used (use spaces for indentation)
+- Validate YAML using online tools if needed
+
+**"organization_id is required"**
+- Add the `organization_id` field to your configuration
+- Ensure the value is not empty or just whitespace
+
+**"access_key_id is required"**
+- Add the `access_key_id` field to your configuration
+- Verify the access key is valid and has appropriate permissions
+
+### Debugging Configuration Loading
+
+The configuration loading logic is in the `loadConfig()` function in [cmd/aliyun-pipelines-tui/main.go](mdc:cmd/aliyun-pipelines-tui/main.go). Common issues:
+
+1. **File Path**: Ensure `~/.config/` directory exists
+2. **File Permissions**: Application must be able to read the file
+3. **YAML Structure**: Follow the exact format shown in examples
+
+## Migration from Environment Variables
+
+If you previously used environment variables, convert them to the configuration file:
+
+```bash
+# Old environment variables (no longer used)
+ALICLOUD_ACCESS_KEY_ID → access_key_id
+ALICLOUD_ACCESS_KEY_SECRET → access_key_secret  
+ALICLOUD_DEVOPS_ORG_ID → organization_id
+ALICLOUD_REGION_ID → region_id
+```

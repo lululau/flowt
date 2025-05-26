@@ -3,6 +3,7 @@ package ui
 import (
 	"aliyun-pipelines-tui/internal/api"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -10,26 +11,30 @@ import (
 )
 
 var (
-	allPipelines        []api.Pipeline
-	allPipelineGroups   []api.PipelineGroup
-	currentViewMode     string // "all_pipelines", "group_list", "pipelines_in_group"
-	selectedGroupID     string
-	selectedGroupName   string
+	allPipelines      []api.Pipeline
+	allPipelineGroups []api.PipelineGroup
+	currentViewMode   string // "all_pipelines", "group_list", "pipelines_in_group"
+	selectedGroupID   string
+	selectedGroupName string
 
 	currentSearchQuery  string
 	currentStatusFilter string
 	statusesToCycle     = []string{"ALL", "SUCCESS", "RUNNING", "FAILED", "CANCELED"}
 	currentStatusIndex  = 0
 
+	// Maps to store references since tview removed SetItemReference/GetItemReference
+	pipelineIndexMap = make(map[int]*api.Pipeline)
+	groupIndexMap    = make(map[int]*api.PipelineGroup)
+
 	// New state variables for current run and log view
-	currentRunID              string
-	currentPipelineIDForRun   string
-	isLogViewActive           bool
-	logViewTextView           *tview.TextView
-	logPage                   *tview.Flex // Flex layout for the log page
-	pipelineListGlobal        *tview.List // To allow focus from modal
-	mainPagesGlobal           *tview.Pages // To allow modal to be added/removed
-	appGlobal                 *tview.Application // For setting focus from modal
+	currentRunID            string
+	currentPipelineIDForRun string
+	isLogViewActive         bool
+	logViewTextView         *tview.TextView
+	logPage                 *tview.Flex        // Flex layout for the log page
+	pipelineListGlobal      *tview.List        // To allow focus from modal
+	mainPagesGlobal         *tview.Pages       // To allow modal to be added/removed
+	appGlobal               *tview.Application // For setting focus from modal
 )
 
 // ShowModal displays a modal dialog.
@@ -38,16 +43,16 @@ func ShowModal(title, text string, buttons []string, doneFunc func(buttonIndex i
 		// Should not happen if app is initialized properly
 		return
 	}
-	modal := tview.NewModal().
-		SetText(text).
-		SetTitle(title).
-		AddButtons(buttons).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			HideModal() // Hide modal first
-			if doneFunc != nil {
-				doneFunc(buttonIndex, buttonLabel)
-			}
-		})
+	modal := tview.NewModal()
+	modal.SetText(text)
+	modal.SetTitle(title)
+	modal.AddButtons(buttons)
+	modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+		HideModal() // Hide modal first
+		if doneFunc != nil {
+			doneFunc(buttonIndex, buttonLabel)
+		}
+	})
 	mainPagesGlobal.AddPage("modal", modal, true, true)
 	appGlobal.SetFocus(modal)
 }
@@ -67,12 +72,11 @@ func HideModal() {
 	}
 }
 
-
 // updatePipelineList filters and updates the pipeline list widget.
 // SIMULATION NOTE: Filtering by selectedGroupID currently simulates by checking if pipeline.Name contains selectedGroupName,
 // as api.Pipeline does not have GroupID populated by ListPipelines.
 func updatePipelineList(list *tview.List, app *tview.Application, _ *tview.InputField) {
-	list.Clear() // Clear current items
+	list.Clear()              // Clear current items
 	pipelineListGlobal = list // Update global reference
 
 	var title string
@@ -122,6 +126,9 @@ func updatePipelineList(list *tview.List, app *tview.Application, _ *tview.Input
 		finalFilteredPipelines = append(finalFilteredPipelines, tempFilteredBySearch...)
 	}
 
+	// Clear the pipeline index map
+	pipelineIndexMap = make(map[int]*api.Pipeline)
+
 	// Populate the list
 	if len(finalFilteredPipelines) == 0 {
 		list.AddItem("No pipelines match filters.", "", 0, nil)
@@ -140,8 +147,9 @@ func updatePipelineList(list *tview.List, app *tview.Application, _ *tview.Input
 			if mainText == pipelineCopy.PipelineID {
 				secondaryText = fmt.Sprintf("Status: %s", pipelineCopy.Status)
 			}
-			// Store the pipeline object itself as reference
-			list.AddItem(mainText, secondaryText, shortcut, nil).SetItemReference(list.GetItemCount()-1, pipelineCopy)
+			// Store the pipeline object in our map
+			pipelineIndexMap[i] = &pipelineCopy
+			list.AddItem(mainText, secondaryText, shortcut, nil)
 		}
 	}
 	if list.GetItemCount() > 0 {
@@ -153,7 +161,7 @@ func updatePipelineList(list *tview.List, app *tview.Application, _ *tview.Input
 func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tview.Primitive {
 	// Initialize global references for modal helpers
 	appGlobal = app
-	
+
 	currentViewMode = "all_pipelines"
 	currentSearchQuery = ""
 	currentStatusFilter = "ALL"
@@ -161,7 +169,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	selectedGroupID = ""
 	selectedGroupName = ""
 	isLogViewActive = false
-
 
 	var fetchErrPipelines error
 	allPipelines, fetchErrPipelines = apiClient.ListPipelines(orgId)
@@ -172,12 +179,12 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	// UI Elements
 	pipelineList := tview.NewList().SetSelectedFocusOnly(true)
 	pipelineListGlobal = pipelineList // Set global reference
-	
+
 	searchInput := tview.NewInputField().
 		SetLabel("Search: ").
 		SetPlaceholder("Pipeline name/ID (Ctrl+F to focus)...").
 		SetFieldWidth(0)
-	
+
 	pipelineListFlexView := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(searchInput, 1, 1, false).
 		AddItem(pipelineList, 0, 1, false)
@@ -186,19 +193,31 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	groupList.SetBorder(true).SetTitle("Pipeline Groups")
 	// groupListGlobal = groupList // For HideModal focus restoration
 
+	// Clear the group index map
+	groupIndexMap = make(map[int]*api.PipelineGroup)
+
 	if fetchErrGroups != nil {
-		groupList.AddItem(fmt.Sprintf("Error fetching groups: %v", fetchErrGroups), "", 0, nil)
+		errorMsg := fmt.Sprintf("Error fetching groups: %v", fetchErrGroups)
+		groupList.AddItem(errorMsg, "", 0, nil)
+		// Log error to file
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			fmt.Printf("UI Error: %s\n", errorMsg)
+		}
 	} else if len(allPipelineGroups) == 0 {
 		groupList.AddItem("No pipeline groups found.", "", 0, nil)
 	} else {
 		for i, g := range allPipelineGroups {
 			groupCopy := g
 			var shortcut rune = 0
-			if i < 9 { shortcut = rune(fmt.Sprintf("%d", i+1)[0]) }
-			groupList.AddItem(groupCopy.Name, fmt.Sprintf("ID: %s", groupCopy.GroupID), shortcut, nil).SetItemReference(groupList.GetItemCount()-1, groupCopy)
+			if i < 9 {
+				shortcut = rune(fmt.Sprintf("%d", i+1)[0])
+			}
+			// Store the group object in our map
+			groupIndexMap[i] = &groupCopy
+			groupList.AddItem(groupCopy.Name, fmt.Sprintf("ID: %s", groupCopy.GroupID), shortcut, nil)
 		}
 	}
-	
+
 	// Log View elements
 	logViewTextView = tview.NewTextView().
 		SetDynamicColors(true).
@@ -220,10 +239,14 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	if fetchErrPipelines != nil {
 		pipelineList.Clear()
 		pipelineList.AddItem(fmt.Sprintf("Error fetching pipelines: %v", fetchErrPipelines), "", 0, nil)
+
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			fmt.Printf("UI Error: %s\n", fetchErrPipelines)
+		}
 	} else {
 		updatePipelineList(pipelineList, app, searchInput)
 	}
-	
+
 	// --- Event Handlers for pipelineList ---
 	pipelineList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		currentIndex := pipelineList.GetCurrentItem()
@@ -231,56 +254,59 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 		switch event.Rune() {
 		case 'j':
-			if itemCount > 0 { pipelineList.SetCurrentItem((currentIndex + 1) % itemCount) }
+			if itemCount > 0 {
+				pipelineList.SetCurrentItem((currentIndex + 1) % itemCount)
+			}
 			return nil
 		case 'k':
-			if itemCount > 0 { pipelineList.SetCurrentItem((currentIndex - 1 + itemCount) % itemCount) }
+			if itemCount > 0 {
+				pipelineList.SetCurrentItem((currentIndex - 1 + itemCount) % itemCount)
+			}
 			return nil
 		case 'r': // Run pipeline
 			if itemCount > 0 {
-				ref := pipelineList.GetItemReference(currentIndex)
-				if selectedPipeline, ok := ref.(api.Pipeline); ok {
+				if selectedPipeline, ok := pipelineIndexMap[currentIndex]; ok && selectedPipeline != nil {
 					currentPipelineIDForRun = selectedPipeline.PipelineID
 					// Show confirmation or directly run
-					ShowModal("Run Pipeline?", fmt.Sprintf("Run '%s'?", selectedPipeline.Name), []string{"Run", "Cancel"}, 
+					ShowModal("Run Pipeline?", fmt.Sprintf("Run '%s'?", selectedPipeline.Name), []string{"Run", "Cancel"},
 						func(buttonIndex int, buttonLabel string) {
-						if buttonLabel == "Run" {
-							go func() { // Run in goroutine to avoid blocking UI
-								app.QueueUpdateDraw(func() {
-									logViewTextView.SetText("Initiating pipeline run...")
-									mainPages.SwitchToPage("logs")
-									app.SetFocus(logViewTextView)
-								})
-
-								runResponse, err := apiClient.RunPipeline(orgId, selectedPipeline.PipelineID, nil)
-								if err != nil {
+							if buttonLabel == "Run" {
+								go func() { // Run in goroutine to avoid blocking UI
 									app.QueueUpdateDraw(func() {
-										ShowModal("Error", fmt.Sprintf("Failed to run pipeline: %v", err), []string{"OK"}, nil)
+										logViewTextView.SetText("Initiating pipeline run...")
+										mainPages.SwitchToPage("logs")
+										app.SetFocus(logViewTextView)
 									})
-									return
-								}
-								currentRunID = runResponse.RunID
-								isLogViewActive = true
-								
-								app.QueueUpdateDraw(func() {
-									logViewTextView.SetText(fmt.Sprintf("Pipeline '%s' triggered. Run ID: %s\nFetching run details...\n", selectedPipeline.Name, currentRunID))
-									logViewTextView.ScrollToEnd()
-								})
 
-								// Fetch initial run details
-								runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
-								app.QueueUpdateDraw(func() {
+									runResponse, err := apiClient.RunPipeline(orgId, selectedPipeline.PipelineID, nil)
 									if err != nil {
-										fmt.Fprintf(logViewTextView, "\nError getting run details: %v\n", err)
-									} else {
-										fmt.Fprintf(logViewTextView, "\nRun ID: %s\nStatus: %s\nTrigger: %s\nStart: %s\nFinish: %s\n\nFetching logs is not fully implemented yet. Requires JobID.\n",
-											runDetails.RunID, runDetails.Status, runDetails.TriggerMode, runDetails.StartTime.String(), runDetails.FinishTime.String())
+										app.QueueUpdateDraw(func() {
+											ShowModal("Error", fmt.Sprintf("Failed to run pipeline: %v", err), []string{"OK"}, nil)
+										})
+										return
 									}
-									logViewTextView.ScrollToEnd()
-								})
-							}()
-						}
-					})
+									currentRunID = runResponse.RunID
+									isLogViewActive = true
+
+									app.QueueUpdateDraw(func() {
+										logViewTextView.SetText(fmt.Sprintf("Pipeline '%s' triggered. Run ID: %s\nFetching run details...\n", selectedPipeline.Name, currentRunID))
+										logViewTextView.ScrollToEnd()
+									})
+
+									// Fetch initial run details
+									runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
+									app.QueueUpdateDraw(func() {
+										if err != nil {
+											fmt.Fprintf(logViewTextView, "\nError getting run details: %v\n", err)
+										} else {
+											fmt.Fprintf(logViewTextView, "\nRun ID: %s\nStatus: %s\nTrigger: %s\nStart: %s\nFinish: %s\n\nFetching logs is not fully implemented yet. Requires JobID.\n",
+												runDetails.RunID, runDetails.Status, runDetails.TriggerMode, runDetails.StartTime.String(), runDetails.FinishTime.String())
+										}
+										logViewTextView.ScrollToEnd()
+									})
+								}()
+							}
+						})
 				}
 			}
 			return nil
@@ -322,20 +348,23 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		itemCount := groupList.GetItemCount()
 		switch event.Rune() {
 		case 'j':
-			if itemCount > 0 { groupList.SetCurrentItem((currentIndex + 1) % itemCount) }
+			if itemCount > 0 {
+				groupList.SetCurrentItem((currentIndex + 1) % itemCount)
+			}
 			return nil
 		case 'k':
-			if itemCount > 0 { groupList.SetCurrentItem((currentIndex - 1 + itemCount) % itemCount) }
+			if itemCount > 0 {
+				groupList.SetCurrentItem((currentIndex - 1 + itemCount) % itemCount)
+			}
 			return nil
 		}
 		if event.Key() == tcell.KeyEnter {
 			if itemCount > 0 {
-				ref := groupList.GetItemReference(currentIndex)
-				if selectedGroup, ok := ref.(api.PipelineGroup); ok {
+				if selectedGroup, ok := groupIndexMap[currentIndex]; ok && selectedGroup != nil {
 					selectedGroupID = selectedGroup.GroupID
 					selectedGroupName = selectedGroup.Name
 					currentViewMode = "pipelines_in_group"
-					currentSearchQuery = "" 
+					currentSearchQuery = ""
 					searchInput.SetText("")
 					updatePipelineList(pipelineList, app, searchInput)
 					mainPages.SwitchToPage("pipelines")
@@ -344,7 +373,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			}
 			return nil
 		}
-		if event.Key() == tcell.KeyEscape { 
+		if event.Key() == tcell.KeyEscape {
 			currentViewMode = "all_pipelines"
 			selectedGroupID = ""
 			selectedGroupName = ""
@@ -355,7 +384,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		}
 		return event
 	})
-	
+
 	// --- Event Handlers for logViewTextView ---
 	logViewTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' {
@@ -368,7 +397,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		return event
 	})
 
-
 	// Global keybindings (Ctrl+F, Ctrl+S, Ctrl+G) on mainPages
 	mainPages.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		currentPage, _ := mainPages.GetFrontPage()
@@ -378,32 +406,34 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				app.SetFocus(searchInput)
 				return nil
 			}
-		case tcell.KeyCtrlS: 
+		case tcell.KeyCtrlS:
 			if currentPage == "pipelines" {
 				currentStatusIndex = (currentStatusIndex + 1) % len(statusesToCycle)
 				currentStatusFilter = statusesToCycle[currentStatusIndex]
 				updatePipelineList(pipelineList, app, searchInput)
 				return nil
 			}
-		case tcell.KeyCtrlG: 
+		case tcell.KeyCtrlG:
 			if currentPage == "pipelines" {
 				currentViewMode = "group_list"
-				if groupList.GetItemCount() > 0 { groupList.SetCurrentItem(0) }
+				if groupList.GetItemCount() > 0 {
+					groupList.SetCurrentItem(0)
+				}
 				mainPages.SwitchToPage("groups")
 				app.SetFocus(groupList)
 			} else if currentPage == "groups" {
-				currentViewMode = "all_pipelines" 
+				currentViewMode = "all_pipelines"
 				selectedGroupID = ""
 				selectedGroupName = ""
 				updatePipelineList(pipelineList, app, searchInput)
 				mainPages.SwitchToPage("pipelines")
-				app.SetFocus(pipelineList) 
+				app.SetFocus(pipelineList)
 			}
 			return nil
 		}
 		return event
 	})
-	
+
 	app.SetFocus(pipelineListFlexView)
 
 	return mainPages
