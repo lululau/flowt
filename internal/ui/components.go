@@ -18,10 +18,7 @@ var (
 	selectedGroupID   string
 	selectedGroupName string
 
-	currentSearchQuery  string
-	currentStatusFilter string
-	statusesToCycle     = []string{"ALL", "SUCCESS", "RUNNING", "FAILED", "CANCELED"}
-	currentStatusIndex  = 0
+	currentSearchQuery string
 
 	// Maps to store references for table rows
 	pipelineRowMap = make(map[int]*api.Pipeline)
@@ -118,14 +115,14 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 
 	var title string
 	if currentViewMode == "pipelines_in_group" {
-		title = fmt.Sprintf("Pipelines in '%s' (Filter: %s)", selectedGroupName, currentStatusFilter)
+		title = fmt.Sprintf("Pipelines in '%s'", selectedGroupName)
 	} else {
-		title = fmt.Sprintf("All Pipelines (Filter: %s)", currentStatusFilter)
+		title = "All Pipelines"
 	}
 	table.SetTitle(title)
 
-	// Set table headers
-	headers := []string{"Pipeline Name", "ID", "Status", "Creator", "Last Run Time"}
+	// Set table headers - only ID and Name
+	headers := []string{"ID", "Pipeline Name"}
 	for col, header := range headers {
 		cell := tview.NewTableCell(header).
 			SetTextColor(tcell.ColorYellow).
@@ -162,17 +159,8 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 		tempFilteredBySearch = append(tempFilteredBySearch, tempFilteredByGroup...)
 	}
 
-	// 3. Filter by status
-	finalFilteredPipelines := make([]api.Pipeline, 0)
-	if currentStatusFilter != "ALL" && currentStatusFilter != "" {
-		for _, p := range tempFilteredBySearch {
-			if strings.EqualFold(p.Status, currentStatusFilter) {
-				finalFilteredPipelines = append(finalFilteredPipelines, p)
-			}
-		}
-	} else {
-		finalFilteredPipelines = append(finalFilteredPipelines, tempFilteredBySearch...)
-	}
+	// Final filtered pipelines (no status filtering)
+	finalFilteredPipelines := tempFilteredBySearch
 
 	// Clear the pipeline row map
 	pipelineRowMap = make(map[int]*api.Pipeline)
@@ -185,9 +173,6 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 			SetAlign(tview.AlignCenter)
 		table.SetCell(1, 0, cell)
 		table.SetCell(1, 1, tview.NewTableCell(""))
-		table.SetCell(1, 2, tview.NewTableCell(""))
-		table.SetCell(1, 3, tview.NewTableCell(""))
-		table.SetCell(1, 4, tview.NewTableCell(""))
 	} else {
 		for i, p := range finalFilteredPipelines {
 			pipelineCopy := p // Important: capture range variable for reference
@@ -196,52 +181,19 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 			// Store the pipeline object in our map
 			pipelineRowMap[row] = &pipelineCopy
 
-			// Pipeline Name
-			nameCell := tview.NewTableCell(pipelineCopy.Name).
-				SetTextColor(tcell.ColorWhite).
-				SetAlign(tview.AlignLeft).
-				SetBackgroundColor(tcell.ColorDefault)
-			table.SetCell(row, 0, nameCell)
-
-			// Pipeline ID
+			// Pipeline ID (left column)
 			idCell := tview.NewTableCell(pipelineCopy.PipelineID).
 				SetTextColor(tcell.ColorLightBlue).
 				SetAlign(tview.AlignLeft).
 				SetBackgroundColor(tcell.ColorDefault)
-			table.SetCell(row, 1, idCell)
+			table.SetCell(row, 0, idCell)
 
-			// Status - show last run status if available, otherwise pipeline status
-			displayStatus := pipelineCopy.LastRunStatus
-			if displayStatus == "" {
-				displayStatus = pipelineCopy.Status
-			}
-			statusCell := tview.NewTableCell(displayStatus).
-				SetTextColor(getStatusColor(displayStatus)).
-				SetAlign(tview.AlignLeft).
-				SetBackgroundColor(tcell.ColorDefault)
-			table.SetCell(row, 2, statusCell)
-
-			// Creator - show creator name if available, otherwise creator ID
-			displayCreator := pipelineCopy.CreatorName
-			if displayCreator == "" {
-				displayCreator = pipelineCopy.Creator
-			}
-			creatorCell := tview.NewTableCell(displayCreator).
+			// Pipeline Name (right column)
+			nameCell := tview.NewTableCell(pipelineCopy.Name).
 				SetTextColor(tcell.ColorWhite).
 				SetAlign(tview.AlignLeft).
 				SetBackgroundColor(tcell.ColorDefault)
-			table.SetCell(row, 3, creatorCell)
-
-			// Last Run Time - use LastRunTime if available, otherwise UpdateTime
-			displayTime := pipelineCopy.LastRunTime
-			if displayTime.IsZero() {
-				displayTime = pipelineCopy.UpdateTime
-			}
-			timeCell := tview.NewTableCell(formatTime(displayTime)).
-				SetTextColor(tcell.ColorGray).
-				SetAlign(tview.AlignLeft).
-				SetBackgroundColor(tcell.ColorDefault)
-			table.SetCell(row, 4, timeCell)
+			table.SetCell(row, 1, nameCell)
 		}
 	}
 
@@ -409,39 +361,48 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 		globalRunIndex := startIdx + i
 		runNumCell := tview.NewTableCell(fmt.Sprintf("#%d", totalRuns-globalRunIndex)).
 			SetTextColor(tcell.ColorLightBlue).
-			SetAlign(tview.AlignLeft).
-			SetBackgroundColor(tcell.ColorDefault)
+			SetAlign(tview.AlignCenter).
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(1) // Minimal width
 		table.SetCell(row, 0, runNumCell)
 
-		// Status
+		// Status - make it more compact
 		statusCell := tview.NewTableCell(runCopy.Status).
 			SetTextColor(getStatusColor(runCopy.Status)).
-			SetAlign(tview.AlignLeft).
-			SetBackgroundColor(tcell.ColorDefault)
+			SetAlign(tview.AlignCenter).
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(2) // Small width
 		table.SetCell(row, 1, statusCell)
 
-		// Trigger Mode
-		triggerCell := tview.NewTableCell(runCopy.TriggerMode).
+		// Trigger Mode - compact display
+		triggerDisplay := runCopy.TriggerMode
+		if len(triggerDisplay) > 10 {
+			triggerDisplay = triggerDisplay[:10] + "..."
+		}
+		triggerCell := tview.NewTableCell(triggerDisplay).
 			SetTextColor(tcell.ColorWhite).
 			SetAlign(tview.AlignLeft).
-			SetBackgroundColor(tcell.ColorDefault)
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(2) // Small width
 		table.SetCell(row, 2, triggerCell)
 
-		// Start Time
+		// Start Time - more space for timestamps
 		startTimeCell := tview.NewTableCell(formatTime(runCopy.StartTime)).
 			SetTextColor(tcell.ColorGray).
 			SetAlign(tview.AlignLeft).
-			SetBackgroundColor(tcell.ColorDefault)
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(3) // More width for timestamps
 		table.SetCell(row, 3, startTimeCell)
 
-		// Finish Time
+		// Finish Time - more space for timestamps
 		finishTimeCell := tview.NewTableCell(formatTime(runCopy.FinishTime)).
 			SetTextColor(tcell.ColorGray).
 			SetAlign(tview.AlignLeft).
-			SetBackgroundColor(tcell.ColorDefault)
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(3) // More width for timestamps
 		table.SetCell(row, 4, finishTimeCell)
 
-		// Duration
+		// Duration - compact
 		var duration string
 		if !runCopy.StartTime.IsZero() && !runCopy.FinishTime.IsZero() {
 			dur := runCopy.FinishTime.Sub(runCopy.StartTime)
@@ -460,8 +421,9 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 		}
 		durationCell := tview.NewTableCell(duration).
 			SetTextColor(tcell.ColorGray).
-			SetAlign(tview.AlignLeft).
-			SetBackgroundColor(tcell.ColorDefault)
+			SetAlign(tview.AlignRight).
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(1) // Minimal width
 		table.SetCell(row, 5, durationCell)
 	}
 
@@ -479,8 +441,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	currentViewMode = "all_pipelines"
 	currentSearchQuery = ""
-	currentStatusFilter = "ALL"
-	currentStatusIndex = 0
 	selectedGroupID = ""
 	selectedGroupName = ""
 	isLogViewActive = false
@@ -501,27 +461,20 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	searchInput := tview.NewInputField().
 		SetLabel("Search: ").
-		SetPlaceholder("Pipeline name/ID (Ctrl+F to focus)...").
+		SetPlaceholder("Pipeline name/ID (/ to focus)...").
 		SetFieldWidth(0)
 	searchInput.SetBackgroundColor(tcell.ColorDefault)
-
-	// Status filter info
-	statusInfo := tview.NewTextView().
-		SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter)).
-		SetTextAlign(tview.AlignLeft).
-		SetDynamicColors(true)
-	statusInfo.SetBackgroundColor(tcell.ColorDefault)
+	searchInput.SetFieldBackgroundColor(tcell.ColorDefault)
 
 	// Help info
 	helpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=run history, r=run, Ctrl+G=groups, Ctrl+F=search, Ctrl+S=filter, q=quit").
+		SetText("Keys: j/k=move, Enter=run history, r=run, Ctrl+G=groups, /=search, q=back, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	helpInfo.SetBackgroundColor(tcell.ColorDefault)
 
 	pipelineListFlexView := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(searchInput, 1, 1, false).
-		AddItem(statusInfo, 1, 1, false).
 		AddItem(pipelineTable, 0, 1, true).
 		AddItem(helpInfo, 1, 1, false)
 
@@ -533,7 +486,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Group help info
 	groupHelpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=select group, Esc=back to all pipelines, q=quit").
+		SetText("Keys: j/k=move, Enter=select group, q=back to all pipelines, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	groupHelpInfo.SetBackgroundColor(tcell.ColorDefault)
@@ -560,7 +513,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Run history help info
 	runHistoryHelpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=view logs, [/]=prev/next page, 0=first page, Esc=back to pipelines, q=quit").
+		SetText("Keys: j/k=move, Enter=view logs, [/]=prev/next page, 0=first page, q=back to pipelines, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	runHistoryHelpInfo.SetBackgroundColor(tcell.ColorDefault)
@@ -713,8 +666,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	searchInput.SetChangedFunc(func(text string) {
 		currentSearchQuery = text
 		updatePipelineTable(pipelineTable, app, searchInput)
-		// Update status info
-		statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 	})
 	searchInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter || key == tcell.KeyDown || key == tcell.KeyUp {
@@ -723,7 +674,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			currentSearchQuery = ""
 			searchInput.SetText("")
 			updatePipelineTable(pipelineTable, app, searchInput)
-			statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 			app.SetFocus(pipelineTable)
 		}
 	})
@@ -761,7 +711,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					currentSearchQuery = ""
 					searchInput.SetText("")
 					updatePipelineTable(pipelineTable, app, searchInput)
-					statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 					mainPages.SwitchToPage("pipelines")
 					app.SetFocus(pipelineTable)
 				}
@@ -773,7 +722,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			selectedGroupID = ""
 			selectedGroupName = ""
 			updatePipelineTable(pipelineTable, app, searchInput)
-			statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
 			return nil
@@ -893,23 +841,49 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		return event
 	})
 
-	// Global keybindings (Ctrl+F, Ctrl+S, Ctrl+G) on mainPages
+	// Global keybindings on mainPages
 	mainPages.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		currentPage, _ := mainPages.GetFrontPage()
-		switch event.Key() {
-		case tcell.KeyCtrlF:
+
+		// Handle character keys
+		switch event.Rune() {
+		case '/':
 			if currentPage == "pipelines" { // Only allow search focus if on pipelines page
 				app.SetFocus(searchInput)
 				return nil
 			}
-		case tcell.KeyCtrlS:
-			if currentPage == "pipelines" {
-				currentStatusIndex = (currentStatusIndex + 1) % len(statusesToCycle)
-				currentStatusFilter = statusesToCycle[currentStatusIndex]
+		case 'Q':
+			// Quit application
+			app.Stop()
+			return nil
+		case 'q':
+			// Back/escape behavior
+			if currentPage == "groups" {
+				currentViewMode = "all_pipelines"
+				selectedGroupID = ""
+				selectedGroupName = ""
 				updatePipelineTable(pipelineTable, app, searchInput)
-				statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
-				return nil
+				mainPages.SwitchToPage("pipelines")
+				app.SetFocus(pipelineTable)
+			} else if currentPage == "run_history" {
+				isRunHistoryActive = false
+				mainPages.SwitchToPage("pipelines")
+				app.SetFocus(pipelineTable)
+			} else if currentPage == "logs" {
+				isLogViewActive = false
+				if isRunHistoryActive {
+					mainPages.SwitchToPage("run_history")
+					app.SetFocus(runHistoryTable)
+				} else {
+					mainPages.SwitchToPage("pipelines")
+					app.SetFocus(pipelineTable)
+				}
 			}
+			return nil
+		}
+
+		// Handle special keys
+		switch event.Key() {
 		case tcell.KeyCtrlG:
 			if currentPage == "pipelines" {
 				currentViewMode = "group_list"
@@ -923,7 +897,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				selectedGroupID = ""
 				selectedGroupName = ""
 				updatePipelineTable(pipelineTable, app, searchInput)
-				statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 				mainPages.SwitchToPage("pipelines")
 				app.SetFocus(pipelineTable)
 			}
