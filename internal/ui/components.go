@@ -928,7 +928,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		case 'Q': // Uppercase Q quits
 			app.Stop()
 			return nil // Consumed
-j		case 'q': // Lowercase q
+		case 'q': // Lowercase q
 			// If searchInput is focused, it needs to process 'q' for typing.
 			// searchInput's own InputCapture should return event to allow typing.
 			if focused == searchInput {

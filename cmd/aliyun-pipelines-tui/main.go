@@ -144,7 +144,7 @@ func main() {
 			app.Stop()
 			return nil
 		case tcell.KeyRune:
-			if event.Rune() == 'q' {
+			if event.Rune() == 'Q' {
 				app.Stop()
 				return nil
 			}
