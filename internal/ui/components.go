@@ -475,18 +475,135 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 			logViewTextView.ScrollToEnd()
 		})
 
-		// Fetch initial run details
-		runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
-		app.QueueUpdateDraw(func() {
-			if err != nil {
-				fmt.Fprintf(logViewTextView, "\nError getting run details: %v\n", err)
-			} else {
-				fmt.Fprintf(logViewTextView, "\nRun Details:\nRun ID: %s\nStatus: %s\nTrigger: %s\nStart: %s\nFinish: %s\n\nPress 'q' to return to pipeline list.\n",
-					runDetails.RunID, runDetails.Status, runDetails.TriggerMode, runDetails.StartTime.String(), runDetails.FinishTime.String())
-			}
-			logViewTextView.ScrollToEnd()
-		})
+		// Start automatic log fetching and refreshing every 5 seconds
+		startLogAutoRefresh(app, apiClient, orgId, selectedPipeline.Name, branchInfo, repoInfo)
 	}()
+}
+
+// Global variables for log auto-refresh control
+var (
+	logRefreshTicker *time.Ticker
+	logRefreshStop   chan bool
+)
+
+// startLogAutoRefresh starts automatic log fetching and refreshing every 5 seconds
+func startLogAutoRefresh(app *tview.Application, apiClient *api.Client, orgId, pipelineName, branchInfo, repoInfo string) {
+	// Stop any existing refresh ticker
+	stopLogAutoRefresh()
+
+	// Create new ticker and stop channel
+	logRefreshTicker = time.NewTicker(5 * time.Second)
+	logRefreshStop = make(chan bool, 1)
+
+	// Start the refresh goroutine
+	go func() {
+		// Initial log fetch
+		fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+
+		for {
+			select {
+			case <-logRefreshTicker.C:
+				// Only refresh if log view is still active
+				if isLogViewActive {
+					fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+				} else {
+					// Stop refreshing if log view is no longer active
+					stopLogAutoRefresh()
+					return
+				}
+			case <-logRefreshStop:
+				return
+			}
+		}
+	}()
+}
+
+// stopLogAutoRefresh stops the automatic log refresh
+func stopLogAutoRefresh() {
+	if logRefreshTicker != nil {
+		logRefreshTicker.Stop()
+		logRefreshTicker = nil
+	}
+	if logRefreshStop != nil {
+		select {
+		case logRefreshStop <- true:
+		default:
+		}
+		close(logRefreshStop)
+		logRefreshStop = nil
+	}
+}
+
+// fetchAndDisplayLogs fetches and displays the current logs for the running pipeline
+func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, pipelineName, branchInfo, repoInfo string) {
+	if currentRunID == "" || currentPipelineIDForRun == "" {
+		return
+	}
+
+	// Fetch run details first to check status
+	runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
+	if err != nil {
+		app.QueueUpdateDraw(func() {
+			currentText := logViewTextView.GetText(false)
+			if !strings.Contains(currentText, "Error getting run details") {
+				fmt.Fprintf(logViewTextView, "\nError getting run details: %v\n", err)
+				logViewTextView.ScrollToEnd()
+			}
+		})
+		return
+	}
+
+	// Fetch complete logs
+	logs, err := apiClient.GetPipelineRunLogs(orgId, currentPipelineIDForRun, currentRunID)
+
+	app.QueueUpdateDraw(func() {
+		// Build the complete log display
+		var logText strings.Builder
+
+		// Header information
+		logText.WriteString(fmt.Sprintf("Pipeline: %s\n", pipelineName))
+		logText.WriteString(fmt.Sprintf("Run ID: %s\n", currentRunID))
+		logText.WriteString(fmt.Sprintf("Branch: %s\n", branchInfo))
+		if repoInfo != "" {
+			logText.WriteString(fmt.Sprintf("Repository: %s\n", repoInfo))
+		}
+		logText.WriteString(fmt.Sprintf("Status: %s\n", runDetails.Status))
+		logText.WriteString(fmt.Sprintf("Trigger: %s\n", runDetails.TriggerMode))
+		if !runDetails.StartTime.IsZero() {
+			logText.WriteString(fmt.Sprintf("Start Time: %s\n", runDetails.StartTime.Format("2006-01-02 15:04:05")))
+		}
+		if !runDetails.FinishTime.IsZero() {
+			logText.WriteString(fmt.Sprintf("Finish Time: %s\n", runDetails.FinishTime.Format("2006-01-02 15:04:05")))
+		}
+
+		// Add refresh timestamp
+		logText.WriteString(fmt.Sprintf("Last Updated: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+		logText.WriteString(strings.Repeat("=", 80) + "\n\n")
+
+		// Add logs content
+		if err != nil {
+			logText.WriteString(fmt.Sprintf("Error fetching logs: %v\n\n", err))
+			logText.WriteString("Note: Log fetching may require additional parameters or the pipeline may still be initializing.\n")
+		} else if logs == "" {
+			logText.WriteString("No logs available yet. The pipeline may still be starting...\n")
+		} else {
+			logText.WriteString(logs)
+		}
+
+		// Add footer with instructions
+		logText.WriteString("\n" + strings.Repeat("=", 80) + "\n")
+		logText.WriteString("Auto-refreshing every 5 seconds. Press 'q' to return to pipeline list.\n")
+
+		// Check if pipeline is finished
+		if runDetails.Status == "SUCCESS" || runDetails.Status == "FAILED" || runDetails.Status == "CANCELED" {
+			logText.WriteString(fmt.Sprintf("Pipeline finished with status: %s\n", runDetails.Status))
+			// Stop auto-refresh for finished pipelines
+			stopLogAutoRefresh()
+		}
+
+		logViewTextView.SetText(logText.String())
+		logViewTextView.ScrollToEnd()
+	})
 }
 
 // updateRunHistoryTable updates the run history table for a specific pipeline
@@ -1071,7 +1188,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					currentRunID = selectedRun.RunID
 					isLogViewActive = true
 
-					// Switch to log view and fetch logs
+					// Switch to log view and start auto-refresh for historical runs
 					go func() {
 						app.QueueUpdateDraw(func() {
 							logViewTextView.SetText(fmt.Sprintf("Fetching logs for run %s...", currentRunID))
@@ -1079,16 +1196,24 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 							app.SetFocus(logViewTextView)
 						})
 
-						// Fetch logs for this run
-						logs, err := apiClient.GetPipelineRunLogs(orgId, currentPipelineIDForRun, currentRunID)
-						app.QueueUpdateDraw(func() {
-							if err != nil {
-								logViewTextView.SetText(fmt.Sprintf("Error fetching logs: %v\n\nNote: Log fetching may require additional JobID parameter which is not yet implemented.", err))
-							} else {
-								logViewTextView.SetText(logs)
-							}
-							logViewTextView.ScrollToEnd()
-						})
+						// For historical runs, we don't have the pipeline name and branch info readily available
+						// So we'll fetch the run details first to get basic info
+						runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
+						var pipelineName, branchInfo, repoInfo string
+						if err == nil {
+							pipelineName = currentPipelineName // Use the stored pipeline name
+							branchInfo = "N/A"                 // Historical runs don't have branch info readily available
+							repoInfo = ""
+						}
+
+						// Start auto-refresh for this historical run (but only refresh once for completed runs)
+						if runDetails != nil && (runDetails.Status == "RUNNING" || runDetails.Status == "QUEUED") {
+							// Only auto-refresh for running pipelines
+							startLogAutoRefresh(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+						} else {
+							// For completed runs, just fetch once
+							fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+						}
 					}()
 				}
 			}
@@ -1106,6 +1231,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	logViewTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' || event.Rune() == 'q' {
 			isLogViewActive = false
+			// Stop auto-refresh when leaving log view
+			stopLogAutoRefresh()
 			if isRunHistoryActive {
 				// Return to run history if we came from there
 				mainPages.SwitchToPage("run_history")
