@@ -11,6 +11,26 @@ import (
 	"github.com/rivo/tview"
 )
 
+// fuzzyMatch performs fuzzy matching between query and text
+// Returns true if all characters in query appear in text in order (case-insensitive)
+func fuzzyMatch(query, text string) bool {
+	if query == "" {
+		return true
+	}
+
+	query = strings.ToLower(query)
+	text = strings.ToLower(text)
+
+	queryIndex := 0
+	for _, char := range text {
+		if queryIndex < len(query) && rune(query[queryIndex]) == char {
+			queryIndex++
+		}
+	}
+
+	return queryIndex == len(query)
+}
+
 var (
 	allPipelines      []api.Pipeline
 	allPipelineGroups []api.PipelineGroup
@@ -18,7 +38,8 @@ var (
 	selectedGroupID   string
 	selectedGroupName string
 
-	currentSearchQuery string
+	currentSearchQuery      string
+	currentGroupSearchQuery string // New: search query for groups
 
 	// Maps to store references for table rows
 	pipelineRowMap = make(map[int]*api.Pipeline)
@@ -36,6 +57,7 @@ var (
 	runHistoryPage          *tview.Flex        // Flex layout for the run history page
 	pipelineTableGlobal     *tview.Table       // To allow focus from modal
 	groupTableGlobal        *tview.Table       // For group list table
+	groupSearchInputGlobal  *tview.InputField  // New: search input for groups
 	mainPagesGlobal         *tview.Pages       // To allow modal to be added/removed
 	appGlobal               *tview.Application // For setting focus from modal
 
@@ -164,12 +186,11 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 		tempFilteredByGroup = append(tempFilteredByGroup, allPipelines...)
 	}
 
-	// 2. Filter by search query (case-insensitive)
+	// 2. Filter by search query (fuzzy search)
 	tempFilteredBySearch := make([]api.Pipeline, 0)
 	if currentSearchQuery != "" {
-		sqLower := strings.ToLower(currentSearchQuery)
 		for _, p := range tempFilteredByGroup {
-			if strings.Contains(strings.ToLower(p.Name), sqLower) || strings.Contains(strings.ToLower(p.PipelineID), sqLower) {
+			if fuzzyMatch(currentSearchQuery, p.Name) || fuzzyMatch(currentSearchQuery, p.PipelineID) {
 				tempFilteredBySearch = append(tempFilteredBySearch, p)
 			}
 		}
@@ -243,16 +264,28 @@ func updateGroupTable(table *tview.Table, app *tview.Application) {
 	// Clear the group row map
 	groupRowMap = make(map[int]*api.PipelineGroup)
 
+	// Filter groups by search query (fuzzy search)
+	filteredGroups := make([]api.PipelineGroup, 0)
+	if currentGroupSearchQuery != "" {
+		for _, g := range allPipelineGroups {
+			if fuzzyMatch(currentGroupSearchQuery, g.Name) || fuzzyMatch(currentGroupSearchQuery, g.GroupID) {
+				filteredGroups = append(filteredGroups, g)
+			}
+		}
+	} else {
+		filteredGroups = append(filteredGroups, allPipelineGroups...)
+	}
+
 	// Populate the table
-	if len(allPipelineGroups) == 0 {
+	if len(filteredGroups) == 0 {
 		// Show "no data" message
-		cell := tview.NewTableCell("No pipeline groups found.").
+		cell := tview.NewTableCell("No pipeline groups match filters.").
 			SetTextColor(tcell.ColorGray).
 			SetAlign(tview.AlignCenter)
 		table.SetCell(1, 0, cell)
 		table.SetCell(1, 1, tview.NewTableCell(""))
 	} else {
-		for i, g := range allPipelineGroups {
+		for i, g := range filteredGroups {
 			groupCopy := g // Important: capture range variable for reference
 			row := i + 1   // +1 because row 0 is header
 
@@ -462,6 +495,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	currentViewMode = "all_pipelines"
 	currentSearchQuery = ""
+	currentGroupSearchQuery = ""
 	selectedGroupID = ""
 	selectedGroupName = ""
 	isLogViewActive = false
@@ -512,14 +546,30 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	groupTable.SetSelectable(true, false)
 	groupTableGlobal = groupTable
 
+	// Group search input
+	groupSearchInput := tview.NewInputField().
+		SetLabel("Search: ").
+		SetPlaceholder("Group name/ID (/ to focus)...").
+		SetFieldWidth(0)
+	groupSearchInput.SetBackgroundColor(tcell.ColorDefault)      // Overall background of the box
+	groupSearchInput.SetFieldBackgroundColor(tcell.ColorDefault) // Background of the text entry area
+	groupSearchInput.SetLabelColor(tcell.ColorWhite)             // Color of the "Search: " label
+	groupSearchInput.SetFieldTextColor(tcell.ColorWhite)         // Color of the text as you type
+	groupSearchInput.SetPlaceholderTextColor(tcell.ColorGray)    // Color of the placeholder text
+	groupSearchInputGlobal = groupSearchInput
+
+	// Explicitly set the style for the field itself
+	groupSearchInput.SetFieldStyle(tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorWhite))
+
 	// Group help info
 	groupHelpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=select group, q=back to all pipelines, Q=quit").
+		SetText("Keys: j/k=move, Enter=select group, /=search, q=back to all pipelines, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	groupHelpInfo.SetBackgroundColor(tcell.ColorDefault)
 
 	groupListFlexView := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(groupSearchInput, 1, 1, false).
 		AddItem(groupTable, 0, 1, true).
 		AddItem(groupHelpInfo, 1, 1, false)
 
@@ -728,6 +778,29 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		return event
 	})
 
+	// --- Event Handlers for groupSearchInput ---
+	groupSearchInput.SetChangedFunc(func(text string) {
+		currentGroupSearchQuery = text
+		updateGroupTable(groupTable, app)
+	})
+	groupSearchInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter || key == tcell.KeyDown || key == tcell.KeyUp {
+			app.SetFocus(groupTable)
+		} else if key == tcell.KeyEscape {
+			currentGroupSearchQuery = ""
+			groupSearchInput.SetText("")
+			updateGroupTable(groupTable, app)
+			app.SetFocus(groupTable)
+		}
+	})
+
+	// Add input capture for group search input to handle 'q' key
+	groupSearchInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// Allow 'q' to be typed in group search input.
+		// For other keys, let them be processed by SetDoneFunc or propagate.
+		return event
+	})
+
 	// --- Event Handlers for groupTable ---
 	groupTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		currentRow, _ := groupTable.GetSelection()
@@ -756,9 +829,15 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			currentViewMode = "all_pipelines"
 			selectedGroupID = ""
 			selectedGroupName = ""
+			currentGroupSearchQuery = ""
+			groupSearchInput.SetText("")
 			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
+			return nil
+		case '/':
+			// Focus group search input
+			app.SetFocus(groupSearchInput)
 			return nil
 		}
 		if event.Key() == tcell.KeyEnter {
@@ -780,6 +859,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			currentViewMode = "all_pipelines"
 			selectedGroupID = ""
 			selectedGroupName = ""
+			currentGroupSearchQuery = ""
+			groupSearchInput.SetText("")
 			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
@@ -913,8 +994,11 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		// Handle character keys
 		switch event.Rune() {
 		case '/':
-			if currentPage == "pipelines" { // Only allow search focus if on pipelines page
+			if currentPage == "pipelines" { // Allow search focus on pipelines page
 				app.SetFocus(searchInput)
+				return nil
+			} else if currentPage == "groups" { // Allow search focus on groups page
+				app.SetFocus(groupSearchInput)
 				return nil
 			}
 		}
@@ -953,9 +1037,9 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			app.Stop()
 			return nil // Consumed
 		case 'q': // Lowercase q
-			// If searchInput is focused, it needs to process 'q' for typing.
-			// searchInput's own InputCapture should return event to allow typing.
-			if focused == searchInput {
+			// If searchInput or groupSearchInput is focused, it needs to process 'q' for typing.
+			// Their own InputCapture should return event to allow typing.
+			if focused == searchInput || focused == groupSearchInputGlobal {
 				return event
 			}
 			// In all other cases where 'q' bubbles up to the app level,
