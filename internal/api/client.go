@@ -137,7 +137,6 @@ type Client struct {
 	endpoint            string             // API endpoint for token-based requests
 	personalAccessToken string             // Personal access token
 	useToken            bool               // Whether to use token-based authentication
-	logger              *log.Logger        // Logger for debugging
 }
 
 var debugLogger *log.Logger
@@ -411,7 +410,6 @@ func (c *Client) listPipelineGroupsWithToken(organizationId string) ([]PipelineG
 			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
 
-		// Log response details for debugging (only in debug mode)
 		if os.Getenv("FLOWT_DEBUG") == "1" {
 			debugLogger.Printf("ListPipelineGroups URL: %s", url)
 			debugLogger.Printf("Response Status: %d", resp.StatusCode)
@@ -546,7 +544,6 @@ func (c *Client) ListPipelineGroupPipelines(organizationId string, groupId int, 
 			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
 
-		// Log response details for debugging (only in debug mode)
 		if os.Getenv("FLOWT_DEBUG") == "1" {
 			debugLogger.Printf("ListPipelineGroupPipelines URL: %s", url)
 			debugLogger.Printf("Response Status: %d", resp.StatusCode)
@@ -656,62 +653,130 @@ func (c *Client) runPipelineWithToken(organizationId, pipelineIdStr string, para
 		"params": paramsJSON,
 	}
 
-	response, err := c.makeTokenRequest("POST", path, requestBody)
+	// Make the request directly to handle string response
+	url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+
+	var reqBody io.Reader
+	if requestBody != nil {
+		jsonBody, err := json.Marshal(requestBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		reqBody = bytes.NewBuffer(jsonBody)
+	}
+
+	req, err := http.NewRequest("POST", url, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to run pipeline with token: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// According to the official API documentation, the response is just an integer (run ID)
-	var runID string
+	req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
 
-	// The makeTokenRequest returns map[string]interface{}, but according to API docs,
-	// CreatePipelineRun returns a simple integer. Let's check different possible response formats.
+	resp, err := c.httpClient.Do(req)
 
-	// Check if response contains the run ID directly as a value
-	for _, value := range response {
-		if runIdFloat, ok := value.(float64); ok {
-			runID = fmt.Sprintf("%.0f", runIdFloat)
-			break
-		} else if runIdInt, ok := value.(int); ok {
-			runID = fmt.Sprintf("%d", runIdInt)
-			break
-		} else if runIdStr, ok := value.(string); ok {
-			runID = runIdStr
-			break
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("RunPipeline Request URL: %s", url)
+		debugLogger.Printf("RunPipeline Request Method: POST")
+		debugLogger.Printf("RunPipeline Request Headers: %v", req.Header)
+		debugLogger.Printf("RunPipeline Response Status: %d", resp.StatusCode)
+		debugLogger.Printf("RunPipeline Response Headers: %v", resp.Header)
+		debugLogger.Printf("RunPipeline Response Body: %s", string(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// According to user feedback, the response is a bare number (e.g., "21") representing the run ID
+	// First, try to parse as string directly
+	runID := strings.TrimSpace(string(respBody))
+
+	// Remove quotes if the response is a quoted string
+	if len(runID) >= 2 && runID[0] == '"' && runID[len(runID)-1] == '"' {
+		runID = runID[1 : len(runID)-1]
+	}
+
+	// Validate that the runID is a valid number (since API returns bare numbers)
+	if runID != "" {
+		// Try to parse as integer to validate it's a number
+		if _, err := strconv.ParseInt(runID, 10, 64); err == nil {
+			// It's a valid number, use it directly
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Successfully parsed run ID as number: %s", runID)
+			}
+		} else {
+			// Not a valid number, might be JSON or other format
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Run ID is not a number, trying JSON parsing: %s", runID)
+			}
+
+			// Only try JSON parsing if the response looks like JSON
+			if len(respBody) > 0 && (respBody[0] == '{' || respBody[0] == '[') {
+				var response map[string]interface{}
+				if err := json.Unmarshal(respBody, &response); err == nil {
+					// Try to extract run ID from JSON response
+					if data, ok := response["data"]; ok {
+						if runIdFloat, ok := data.(float64); ok {
+							runID = fmt.Sprintf("%.0f", runIdFloat)
+						} else if runIdInt, ok := data.(int); ok {
+							runID = fmt.Sprintf("%d", runIdInt)
+						} else if runIdStr, ok := data.(string); ok {
+							runID = runIdStr
+						}
+					} else if runIdValue, ok := response["runId"]; ok {
+						if runIdFloat, ok := runIdValue.(float64); ok {
+							runID = fmt.Sprintf("%.0f", runIdFloat)
+						} else if runIdInt, ok := runIdValue.(int); ok {
+							runID = fmt.Sprintf("%d", runIdInt)
+						} else if runIdStr, ok := runIdValue.(string); ok {
+							runID = runIdStr
+						}
+					} else if idValue, ok := response["id"]; ok {
+						if runIdFloat, ok := idValue.(float64); ok {
+							runID = fmt.Sprintf("%.0f", runIdFloat)
+						} else if runIdInt, ok := idValue.(int); ok {
+							runID = fmt.Sprintf("%d", runIdInt)
+						} else if runIdStr, ok := idValue.(string); ok {
+							runID = runIdStr
+						}
+					} else {
+						// Check if response contains the run ID directly as a value
+						for _, value := range response {
+							if runIdFloat, ok := value.(float64); ok {
+								runID = fmt.Sprintf("%.0f", runIdFloat)
+								break
+							} else if runIdInt, ok := value.(int); ok {
+								runID = fmt.Sprintf("%d", runIdInt)
+								break
+							} else if runIdStr, ok := value.(string); ok {
+								runID = runIdStr
+								break
+							}
+						}
+					}
+				} else {
+					if os.Getenv("FLOWT_DEBUG") == "1" {
+						debugLogger.Printf("Failed to parse as JSON: %v", err)
+					}
+				}
+			}
 		}
 	}
 
-	// If not found, check for common response field names
 	if runID == "" {
-		if data, ok := response["data"]; ok {
-			if runIdFloat, ok := data.(float64); ok {
-				runID = fmt.Sprintf("%.0f", runIdFloat)
-			} else if runIdInt, ok := data.(int); ok {
-				runID = fmt.Sprintf("%d", runIdInt)
-			} else if runIdStr, ok := data.(string); ok {
-				runID = runIdStr
-			}
-		} else if runIdValue, ok := response["runId"]; ok {
-			if runIdFloat, ok := runIdValue.(float64); ok {
-				runID = fmt.Sprintf("%.0f", runIdFloat)
-			} else if runIdInt, ok := runIdValue.(int); ok {
-				runID = fmt.Sprintf("%d", runIdInt)
-			} else if runIdStr, ok := runIdValue.(string); ok {
-				runID = runIdStr
-			}
-		} else if idValue, ok := response["id"]; ok {
-			if runIdFloat, ok := idValue.(float64); ok {
-				runID = fmt.Sprintf("%.0f", runIdFloat)
-			} else if runIdInt, ok := idValue.(int); ok {
-				runID = fmt.Sprintf("%d", runIdInt)
-			} else if runIdStr, ok := idValue.(string); ok {
-				runID = runIdStr
-			}
-		}
-	}
-
-	if runID == "" {
-		return nil, fmt.Errorf("failed to extract run ID from response: %+v", response)
+		return nil, fmt.Errorf("failed to extract run ID from response. Response body: %s", string(respBody))
 	}
 
 	// Return a minimal PipelineRun object
@@ -1632,7 +1697,6 @@ func (c *Client) fetchPipelineRunsPage(path string) ([]PipelineRun, bool, error)
 		return nil, false, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Log response for debugging
 	if os.Getenv("FLOWT_DEBUG") == "1" {
 		debugLogger.Printf("Trying pipeline runs endpoint: %s", url)
 		debugLogger.Printf("Response Status: %d", resp.StatusCode)
@@ -1978,7 +2042,6 @@ func (c *Client) makeTokenRequest(method, path string, body interface{}) (map[st
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Log response details for debugging (only in debug mode)
 	if os.Getenv("FLOWT_DEBUG") == "1" {
 		debugLogger.Printf("Request URL: %s", url)
 		debugLogger.Printf("Request Method: %s", method)
@@ -2041,7 +2104,6 @@ func (c *Client) listPipelinesWithToken(organizationId string) ([]Pipeline, erro
 			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
 
-		// Log response details for debugging (only in debug mode)
 		if os.Getenv("FLOWT_DEBUG") == "1" {
 			debugLogger.Printf("Request URL: %s", url)
 			debugLogger.Printf("Response Status: %d", resp.StatusCode)
@@ -2190,55 +2252,55 @@ func (c *Client) getPipelineRunWithToken(organizationId, pipelineIdStr, runIdStr
 		return nil, fmt.Errorf("API error: %s (ErrorCode: %s)", errorMsg, errorCode)
 	}
 
-	// Try to find the run data in the response
-	var runData interface{}
-	if data, ok := response["data"]; ok {
-		runData = data
-	} else if result, ok := response["result"]; ok {
-		runData = result
-	} else {
-		// If no known data field is found, return error
-		return nil, fmt.Errorf("no run data found in response")
-	}
+	// According to the official API documentation, the response directly contains the pipeline run data
+	// No need to extract from "data" or "result" fields
+	runMap := response
 
-	// Convert to map
-	runMap, ok := runData.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("unexpected pipeline run data format: %T", runData)
-	}
-
-	// Parse timestamps
+	// Parse timestamps according to API documentation (timestamps are in milliseconds)
 	var startTime, finishTime time.Time
-	if st, ok := runMap["startTime"].(float64); ok && st > 0 {
-		startTime = time.Unix(int64(st)/1000, 0)
-	} else if stStr, ok := runMap["startTime"].(string); ok {
-		startTime, _ = time.Parse(time.RFC3339, stStr)
+	if createTime, ok := runMap["createTime"].(float64); ok && createTime > 0 {
+		startTime = time.Unix(int64(createTime)/1000, 0)
 	}
-	if ft, ok := runMap["finishTime"].(float64); ok && ft > 0 {
-		finishTime = time.Unix(int64(ft)/1000, 0)
-	} else if ftStr, ok := runMap["finishTime"].(string); ok {
-		finishTime, _ = time.Parse(time.RFC3339, ftStr)
+	if updateTime, ok := runMap["updateTime"].(float64); ok && updateTime > 0 {
+		finishTime = time.Unix(int64(updateTime)/1000, 0)
 	}
 
-	// Extract run ID
+	// Extract run ID according to API documentation
 	var runID string
-	if id, ok := runMap["id"].(string); ok {
-		runID = id
-	} else if id, ok := runMap["id"].(float64); ok {
+	if id, ok := runMap["pipelineRunId"].(float64); ok {
 		runID = fmt.Sprintf("%.0f", id)
-	} else if id, ok := runMap["runId"].(string); ok {
+	} else if id, ok := runMap["pipelineRunId"].(string); ok {
 		runID = id
-	} else if id, ok := runMap["runId"].(float64); ok {
-		runID = fmt.Sprintf("%.0f", id)
 	} else {
 		runID = runIdStr // Fallback to input
+	}
+
+	// Parse trigger mode according to API documentation (it's an integer)
+	var triggerMode string
+	if tm, ok := runMap["triggerMode"].(float64); ok {
+		switch int(tm) {
+		case 1:
+			triggerMode = "MANUAL"
+		case 2:
+			triggerMode = "SCHEDULE"
+		case 3:
+			triggerMode = "PUSH"
+		case 5:
+			triggerMode = "PIPELINE"
+		case 6:
+			triggerMode = "WEBHOOK"
+		default:
+			triggerMode = fmt.Sprintf("UNKNOWN(%d)", int(tm))
+		}
+	} else {
+		triggerMode = getStringField(runMap, "triggerMode")
 	}
 
 	pipelineRun := &PipelineRun{
 		RunID:       runID,
 		PipelineID:  pipelineIdStr,
 		Status:      getStringField(runMap, "status"),
-		TriggerMode: getStringField(runMap, "triggerMode"),
+		TriggerMode: triggerMode,
 		StartTime:   startTime,
 		FinishTime:  finishTime,
 	}
@@ -2299,7 +2361,6 @@ func (c *Client) ListPipelineJobHistorys(organizationId, pipelineId, category, i
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Log response for debugging
 	if os.Getenv("FLOWT_DEBUG") == "1" {
 		debugLogger.Printf("ListPipelineJobHistorys URL: %s", url)
 		debugLogger.Printf("Response Status: %d", resp.StatusCode)
