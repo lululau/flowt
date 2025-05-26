@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -22,19 +23,27 @@ var (
 	statusesToCycle     = []string{"ALL", "SUCCESS", "RUNNING", "FAILED", "CANCELED"}
 	currentStatusIndex  = 0
 
-	// Maps to store references since tview removed SetItemReference/GetItemReference
-	pipelineIndexMap = make(map[int]*api.Pipeline)
-	groupIndexMap    = make(map[int]*api.PipelineGroup)
+	// Maps to store references for table rows
+	pipelineRowMap = make(map[int]*api.Pipeline)
+	groupRowMap    = make(map[int]*api.PipelineGroup)
 
 	// New state variables for current run and log view
 	currentRunID            string
 	currentPipelineIDForRun string
+	currentPipelineName     string
 	isLogViewActive         bool
+	isRunHistoryActive      bool
 	logViewTextView         *tview.TextView
 	logPage                 *tview.Flex        // Flex layout for the log page
-	pipelineListGlobal      *tview.List        // To allow focus from modal
+	runHistoryTable         *tview.Table       // Table for pipeline run history
+	runHistoryPage          *tview.Flex        // Flex layout for the run history page
+	pipelineTableGlobal     *tview.Table       // To allow focus from modal
+	groupTableGlobal        *tview.Table       // For group list table
 	mainPagesGlobal         *tview.Pages       // To allow modal to be added/removed
 	appGlobal               *tview.Application // For setting focus from modal
+
+	// Maps to store run history references
+	runHistoryRowMap = make(map[int]*api.PipelineRun)
 )
 
 // ShowModal displays a modal dialog.
@@ -64,20 +73,42 @@ func HideModal() {
 		return
 	}
 	mainPagesGlobal.RemovePage("modal")
-	// Try to restore focus to a sensible default, like the pipeline list
-	if pipelineListGlobal != nil && (currentViewMode == "all_pipelines" || currentViewMode == "pipelines_in_group") {
-		appGlobal.SetFocus(pipelineListGlobal)
-	} else if currentViewMode == "group_list" { // Assuming groupListGlobal exists and is similar
-		// appGlobal.SetFocus(groupListGlobal) // Needs groupListGlobal
+	// Try to restore focus to a sensible default, like the pipeline table
+	if pipelineTableGlobal != nil && (currentViewMode == "all_pipelines" || currentViewMode == "pipelines_in_group") {
+		appGlobal.SetFocus(pipelineTableGlobal)
+	} else if currentViewMode == "group_list" && groupTableGlobal != nil {
+		appGlobal.SetFocus(groupTableGlobal)
 	}
 }
 
-// updatePipelineList filters and updates the pipeline list widget.
-// SIMULATION NOTE: Filtering by selectedGroupID currently simulates by checking if pipeline.Name contains selectedGroupName,
-// as api.Pipeline does not have GroupID populated by ListPipelines.
-func updatePipelineList(list *tview.List, app *tview.Application, _ *tview.InputField) {
-	list.Clear()              // Clear current items
-	pipelineListGlobal = list // Update global reference
+// formatTime formats time for display in table
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format("2006-01-02 15:04")
+}
+
+// getStatusColor returns color for status display
+func getStatusColor(status string) tcell.Color {
+	switch strings.ToUpper(status) {
+	case "SUCCESS":
+		return tcell.ColorGreen
+	case "RUNNING":
+		return tcell.ColorYellow
+	case "FAILED":
+		return tcell.ColorRed
+	case "CANCELED":
+		return tcell.ColorOrange
+	default:
+		return tcell.ColorWhite
+	}
+}
+
+// updatePipelineTable filters and updates the pipeline table widget.
+func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.InputField) {
+	table.Clear()
+	pipelineTableGlobal = table // Update global reference
 
 	var title string
 	if currentViewMode == "pipelines_in_group" {
@@ -85,7 +116,18 @@ func updatePipelineList(list *tview.List, app *tview.Application, _ *tview.Input
 	} else {
 		title = fmt.Sprintf("All Pipelines (Filter: %s)", currentStatusFilter)
 	}
-	list.SetTitle(title)
+	table.SetTitle(title)
+
+	// Set table headers
+	headers := []string{"Pipeline Name", "ID", "Status", "Creator", "Last Run Time"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).
+			SetTextColor(tcell.ColorYellow).
+			SetAlign(tview.AlignLeft).
+			SetSelectable(false).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(0, col, cell)
+	}
 
 	// 1. Filter by selected group (simulation)
 	tempFilteredByGroup := make([]api.Pipeline, 0)
@@ -126,34 +168,262 @@ func updatePipelineList(list *tview.List, app *tview.Application, _ *tview.Input
 		finalFilteredPipelines = append(finalFilteredPipelines, tempFilteredBySearch...)
 	}
 
-	// Clear the pipeline index map
-	pipelineIndexMap = make(map[int]*api.Pipeline)
+	// Clear the pipeline row map
+	pipelineRowMap = make(map[int]*api.Pipeline)
 
-	// Populate the list
+	// Populate the table
 	if len(finalFilteredPipelines) == 0 {
-		list.AddItem("No pipelines match filters.", "", 0, nil)
+		// Show "no data" message
+		cell := tview.NewTableCell("No pipelines match filters.").
+			SetTextColor(tcell.ColorGray).
+			SetAlign(tview.AlignCenter)
+		table.SetCell(1, 0, cell)
+		table.SetCell(1, 1, tview.NewTableCell(""))
+		table.SetCell(1, 2, tview.NewTableCell(""))
+		table.SetCell(1, 3, tview.NewTableCell(""))
+		table.SetCell(1, 4, tview.NewTableCell(""))
 	} else {
 		for i, p := range finalFilteredPipelines {
 			pipelineCopy := p // Important: capture range variable for reference
-			mainText := pipelineCopy.Name
-			if mainText == "" {
-				mainText = pipelineCopy.PipelineID
-			}
-			var shortcut rune
-			if i < 9 {
-				shortcut = rune(fmt.Sprintf("%d", i+1)[0])
-			}
-			secondaryText := fmt.Sprintf("ID: %s, Status: %s", pipelineCopy.PipelineID, pipelineCopy.Status)
-			if mainText == pipelineCopy.PipelineID {
-				secondaryText = fmt.Sprintf("Status: %s", pipelineCopy.Status)
-			}
+			row := i + 1      // +1 because row 0 is header
+
 			// Store the pipeline object in our map
-			pipelineIndexMap[i] = &pipelineCopy
-			list.AddItem(mainText, secondaryText, shortcut, nil)
+			pipelineRowMap[row] = &pipelineCopy
+
+			// Pipeline Name
+			nameCell := tview.NewTableCell(pipelineCopy.Name).
+				SetTextColor(tcell.ColorWhite).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(tcell.ColorDefault)
+			table.SetCell(row, 0, nameCell)
+
+			// Pipeline ID
+			idCell := tview.NewTableCell(pipelineCopy.PipelineID).
+				SetTextColor(tcell.ColorLightBlue).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(tcell.ColorDefault)
+			table.SetCell(row, 1, idCell)
+
+			// Status - show last run status if available, otherwise pipeline status
+			displayStatus := pipelineCopy.LastRunStatus
+			if displayStatus == "" {
+				displayStatus = pipelineCopy.Status
+			}
+			statusCell := tview.NewTableCell(displayStatus).
+				SetTextColor(getStatusColor(displayStatus)).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(tcell.ColorDefault)
+			table.SetCell(row, 2, statusCell)
+
+			// Creator - show creator name if available, otherwise creator ID
+			displayCreator := pipelineCopy.CreatorName
+			if displayCreator == "" {
+				displayCreator = pipelineCopy.Creator
+			}
+			creatorCell := tview.NewTableCell(displayCreator).
+				SetTextColor(tcell.ColorWhite).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(tcell.ColorDefault)
+			table.SetCell(row, 3, creatorCell)
+
+			// Last Run Time - use LastRunTime if available, otherwise UpdateTime
+			displayTime := pipelineCopy.LastRunTime
+			if displayTime.IsZero() {
+				displayTime = pipelineCopy.UpdateTime
+			}
+			timeCell := tview.NewTableCell(formatTime(displayTime)).
+				SetTextColor(tcell.ColorGray).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(tcell.ColorDefault)
+			table.SetCell(row, 4, timeCell)
 		}
 	}
-	if list.GetItemCount() > 0 {
-		list.SetCurrentItem(0)
+
+	// Set column widths to fill the screen
+	table.SetFixed(1, 0) // Fix header row
+	if table.GetRowCount() > 1 {
+		table.Select(1, 0) // Select first data row
+	}
+}
+
+// updateGroupTable updates the group list table
+func updateGroupTable(table *tview.Table, app *tview.Application) {
+	table.Clear()
+	groupTableGlobal = table // Update global reference
+
+	table.SetTitle("Pipeline Groups")
+
+	// Set table headers
+	headers := []string{"Group Name", "Group ID"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).
+			SetTextColor(tcell.ColorYellow).
+			SetAlign(tview.AlignLeft).
+			SetSelectable(false).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(0, col, cell)
+	}
+
+	// Clear the group row map
+	groupRowMap = make(map[int]*api.PipelineGroup)
+
+	// Populate the table
+	if len(allPipelineGroups) == 0 {
+		// Show "no data" message
+		cell := tview.NewTableCell("No pipeline groups found.").
+			SetTextColor(tcell.ColorGray).
+			SetAlign(tview.AlignCenter)
+		table.SetCell(1, 0, cell)
+		table.SetCell(1, 1, tview.NewTableCell(""))
+	} else {
+		for i, g := range allPipelineGroups {
+			groupCopy := g // Important: capture range variable for reference
+			row := i + 1   // +1 because row 0 is header
+
+			// Store the group object in our map
+			groupRowMap[row] = &groupCopy
+
+			// Group Name
+			nameCell := tview.NewTableCell(groupCopy.Name).
+				SetTextColor(tcell.ColorWhite).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(tcell.ColorDefault)
+			table.SetCell(row, 0, nameCell)
+
+			// Group ID
+			idCell := tview.NewTableCell(groupCopy.GroupID).
+				SetTextColor(tcell.ColorLightBlue).
+				SetAlign(tview.AlignLeft).
+				SetBackgroundColor(tcell.ColorDefault)
+			table.SetCell(row, 1, idCell)
+		}
+	}
+
+	// Set column widths and selection
+	table.SetFixed(1, 0) // Fix header row
+	if table.GetRowCount() > 1 {
+		table.Select(1, 0) // Select first data row
+	}
+}
+
+// updateRunHistoryTable updates the run history table for a specific pipeline
+func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient *api.Client, orgId, pipelineId, pipelineName string) {
+	table.Clear()
+	table.SetTitle(fmt.Sprintf("Run History - %s", pipelineName))
+
+	// Set table headers
+	headers := []string{"#", "Status", "Trigger", "Start Time", "Finish Time", "Duration"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).
+			SetTextColor(tcell.ColorYellow).
+			SetAlign(tview.AlignLeft).
+			SetSelectable(false).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(0, col, cell)
+	}
+
+	// Clear the run history row map
+	runHistoryRowMap = make(map[int]*api.PipelineRun)
+
+	// Fetch pipeline runs
+	runs, err := apiClient.ListPipelineRuns(orgId, pipelineId)
+	if err != nil {
+		// Show error message
+		cell := tview.NewTableCell(fmt.Sprintf("Error fetching runs: %v", err)).
+			SetTextColor(tcell.ColorRed).
+			SetAlign(tview.AlignCenter).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(1, 0, cell)
+		for i := 1; i < len(headers); i++ {
+			table.SetCell(1, i, tview.NewTableCell("").SetBackgroundColor(tcell.ColorDefault))
+		}
+		return
+	}
+
+	if len(runs) == 0 {
+		// Show "no data" message
+		cell := tview.NewTableCell("No run history found.").
+			SetTextColor(tcell.ColorGray).
+			SetAlign(tview.AlignCenter).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(1, 0, cell)
+		for i := 1; i < len(headers); i++ {
+			table.SetCell(1, i, tview.NewTableCell("").SetBackgroundColor(tcell.ColorDefault))
+		}
+		return
+	}
+
+	// Populate the table with runs
+	for i, run := range runs {
+		runCopy := run // Important: capture range variable for reference
+		row := i + 1   // +1 because row 0 is header
+
+		// Store the run object in our map
+		runHistoryRowMap[row] = &runCopy
+
+		// Run number (reverse order, latest first)
+		runNumCell := tview.NewTableCell(fmt.Sprintf("#%d", len(runs)-i)).
+			SetTextColor(tcell.ColorLightBlue).
+			SetAlign(tview.AlignLeft).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(row, 0, runNumCell)
+
+		// Status
+		statusCell := tview.NewTableCell(runCopy.Status).
+			SetTextColor(getStatusColor(runCopy.Status)).
+			SetAlign(tview.AlignLeft).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(row, 1, statusCell)
+
+		// Trigger Mode
+		triggerCell := tview.NewTableCell(runCopy.TriggerMode).
+			SetTextColor(tcell.ColorWhite).
+			SetAlign(tview.AlignLeft).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(row, 2, triggerCell)
+
+		// Start Time
+		startTimeCell := tview.NewTableCell(formatTime(runCopy.StartTime)).
+			SetTextColor(tcell.ColorGray).
+			SetAlign(tview.AlignLeft).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(row, 3, startTimeCell)
+
+		// Finish Time
+		finishTimeCell := tview.NewTableCell(formatTime(runCopy.FinishTime)).
+			SetTextColor(tcell.ColorGray).
+			SetAlign(tview.AlignLeft).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(row, 4, finishTimeCell)
+
+		// Duration
+		var duration string
+		if !runCopy.StartTime.IsZero() && !runCopy.FinishTime.IsZero() {
+			dur := runCopy.FinishTime.Sub(runCopy.StartTime)
+			if dur > time.Hour {
+				duration = fmt.Sprintf("%.1fh", dur.Hours())
+			} else if dur > time.Minute {
+				duration = fmt.Sprintf("%.1fm", dur.Minutes())
+			} else {
+				duration = fmt.Sprintf("%.0fs", dur.Seconds())
+			}
+		} else if !runCopy.StartTime.IsZero() {
+			// Running or incomplete
+			duration = "Running..."
+		} else {
+			duration = "-"
+		}
+		durationCell := tview.NewTableCell(duration).
+			SetTextColor(tcell.ColorGray).
+			SetAlign(tview.AlignLeft).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(row, 5, durationCell)
+	}
+
+	// Set column widths to fill the screen
+	table.SetFixed(1, 0) // Fix header row
+	if table.GetRowCount() > 1 {
+		table.Select(1, 0) // Select first data row
 	}
 }
 
@@ -169,6 +439,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	selectedGroupID = ""
 	selectedGroupName = ""
 	isLogViewActive = false
+	isRunHistoryActive = false
 
 	var fetchErrPipelines error
 	allPipelines, fetchErrPipelines = apiClient.ListPipelines(orgId)
@@ -177,46 +448,54 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	allPipelineGroups, fetchErrGroups = apiClient.ListPipelineGroups(orgId)
 
 	// UI Elements
-	pipelineList := tview.NewList().SetSelectedFocusOnly(true)
-	pipelineListGlobal = pipelineList // Set global reference
+	pipelineTable := tview.NewTable().SetBorders(false).SetSelectable(true, false)
+	pipelineTable.SetBorder(true).SetBackgroundColor(tcell.ColorDefault)
+	// Enable table to receive focus and handle input
+	pipelineTable.SetSelectable(true, false)
+	pipelineTableGlobal = pipelineTable // Set global reference
 
 	searchInput := tview.NewInputField().
 		SetLabel("Search: ").
 		SetPlaceholder("Pipeline name/ID (Ctrl+F to focus)...").
 		SetFieldWidth(0)
+	searchInput.SetBackgroundColor(tcell.ColorDefault)
+
+	// Status filter info
+	statusInfo := tview.NewTextView().
+		SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter)).
+		SetTextAlign(tview.AlignLeft).
+		SetDynamicColors(true)
+	statusInfo.SetBackgroundColor(tcell.ColorDefault)
+
+	// Help info
+	helpInfo := tview.NewTextView().
+		SetText("Keys: j/k=move, Enter=run history, r=run, Ctrl+G=groups, Ctrl+F=search, Ctrl+S=filter, q=quit").
+		SetTextAlign(tview.AlignLeft).
+		SetTextColor(tcell.ColorGray)
+	helpInfo.SetBackgroundColor(tcell.ColorDefault)
 
 	pipelineListFlexView := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(searchInput, 1, 1, false).
-		AddItem(pipelineList, 0, 1, false)
+		AddItem(statusInfo, 1, 1, false).
+		AddItem(pipelineTable, 0, 1, true).
+		AddItem(helpInfo, 1, 1, false)
 
-	groupList := tview.NewList().SetSelectedFocusOnly(true)
-	groupList.SetBorder(true).SetTitle("Pipeline Groups")
-	// groupListGlobal = groupList // For HideModal focus restoration
+	groupTable := tview.NewTable().SetBorders(false).SetSelectable(true, false)
+	groupTable.SetBorder(true).SetBackgroundColor(tcell.ColorDefault)
+	// Enable table to receive focus and handle input
+	groupTable.SetSelectable(true, false)
+	groupTableGlobal = groupTable
 
-	// Clear the group index map
-	groupIndexMap = make(map[int]*api.PipelineGroup)
+	// Group help info
+	groupHelpInfo := tview.NewTextView().
+		SetText("Keys: j/k=move, Enter=select group, Esc=back to all pipelines, q=quit").
+		SetTextAlign(tview.AlignLeft).
+		SetTextColor(tcell.ColorGray)
+	groupHelpInfo.SetBackgroundColor(tcell.ColorDefault)
 
-	if fetchErrGroups != nil {
-		errorMsg := fmt.Sprintf("Error fetching groups: %v", fetchErrGroups)
-		groupList.AddItem(errorMsg, "", 0, nil)
-		// Log error to file
-		if os.Getenv("FLOWT_DEBUG") == "1" {
-			fmt.Printf("UI Error: %s\n", errorMsg)
-		}
-	} else if len(allPipelineGroups) == 0 {
-		groupList.AddItem("No pipeline groups found.", "", 0, nil)
-	} else {
-		for i, g := range allPipelineGroups {
-			groupCopy := g
-			var shortcut rune = 0
-			if i < 9 {
-				shortcut = rune(fmt.Sprintf("%d", i+1)[0])
-			}
-			// Store the group object in our map
-			groupIndexMap[i] = &groupCopy
-			groupList.AddItem(groupCopy.Name, fmt.Sprintf("ID: %s", groupCopy.GroupID), shortcut, nil)
-		}
-	}
+	groupListFlexView := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(groupTable, 0, 1, true).
+		AddItem(groupHelpInfo, 1, 1, false)
 
 	// Log View elements
 	logViewTextView = tview.NewTextView().
@@ -224,48 +503,92 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		SetScrollable(true).
 		SetWordWrap(true).
 		SetChangedFunc(func() { app.Draw() }) // Redraw on text change for scrolling
-	logViewTextView.SetBorder(true).SetTitle("Logs")
+	logViewTextView.SetBorder(true).SetTitle("Logs").SetBackgroundColor(tcell.ColorDefault)
 
 	logPage = tview.NewFlex().AddItem(logViewTextView, 0, 1, true) // TextView takes all space, is focus target
+
+	// Run History View elements
+	runHistoryTable = tview.NewTable().SetBorders(false).SetSelectable(true, false)
+	runHistoryTable.SetBorder(true).SetBackgroundColor(tcell.ColorDefault)
+	// Enable table to receive focus and handle input
+	runHistoryTable.SetSelectable(true, false)
+
+	// Run history help info
+	runHistoryHelpInfo := tview.NewTextView().
+		SetText("Keys: j/k=move, Enter=view logs, Esc=back to pipelines, q=quit").
+		SetTextAlign(tview.AlignLeft).
+		SetTextColor(tcell.ColorGray)
+	runHistoryHelpInfo.SetBackgroundColor(tcell.ColorDefault)
+
+	runHistoryPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(runHistoryTable, 0, 1, true).
+		AddItem(runHistoryHelpInfo, 1, 1, false)
 
 	// Main pages
 	mainPages := tview.NewPages().
 		AddPage("pipelines", pipelineListFlexView, true, true).
-		AddPage("groups", groupList, true, false).
+		AddPage("groups", groupListFlexView, true, false).
+		AddPage("run_history", runHistoryPage, true, false).
 		AddPage("logs", logPage, true, false) // Log page, initially not visible
 	mainPagesGlobal = mainPages // Set global reference for modals
 
-	// Initial population of the pipeline list
+	// Initial population of the pipeline table
 	if fetchErrPipelines != nil {
-		pipelineList.Clear()
-		pipelineList.AddItem(fmt.Sprintf("Error fetching pipelines: %v", fetchErrPipelines), "", 0, nil)
+		pipelineTable.Clear()
+		cell := tview.NewTableCell(fmt.Sprintf("Error fetching pipelines: %v", fetchErrPipelines)).
+			SetTextColor(tcell.ColorRed).
+			SetAlign(tview.AlignCenter)
+		pipelineTable.SetCell(0, 0, cell)
 
 		if os.Getenv("FLOWT_DEBUG") == "1" {
 			fmt.Printf("UI Error: %s\n", fetchErrPipelines)
 		}
 	} else {
-		updatePipelineList(pipelineList, app, searchInput)
+		updatePipelineTable(pipelineTable, app, searchInput)
 	}
 
-	// --- Event Handlers for pipelineList ---
-	pipelineList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		currentIndex := pipelineList.GetCurrentItem()
-		itemCount := pipelineList.GetItemCount()
+	// Initial population of the group table
+	if fetchErrGroups != nil {
+		groupTable.Clear()
+		cell := tview.NewTableCell(fmt.Sprintf("Error fetching groups: %v", fetchErrGroups)).
+			SetTextColor(tcell.ColorRed).
+			SetAlign(tview.AlignCenter)
+		groupTable.SetCell(0, 0, cell)
+
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			fmt.Printf("UI Error: %s\n", fetchErrGroups)
+		}
+	} else {
+		updateGroupTable(groupTable, app)
+	}
+
+	// --- Event Handlers for pipelineTable ---
+	pipelineTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		currentRow, _ := pipelineTable.GetSelection()
+		rowCount := pipelineTable.GetRowCount()
 
 		switch event.Rune() {
 		case 'j':
-			if itemCount > 0 {
-				pipelineList.SetCurrentItem((currentIndex + 1) % itemCount)
+			if rowCount > 1 {
+				newRow := currentRow + 1
+				if newRow >= rowCount {
+					newRow = 1 // Skip header row
+				}
+				pipelineTable.Select(newRow, 0)
 			}
 			return nil
 		case 'k':
-			if itemCount > 0 {
-				pipelineList.SetCurrentItem((currentIndex - 1 + itemCount) % itemCount)
+			if rowCount > 1 {
+				newRow := currentRow - 1
+				if newRow < 1 {
+					newRow = rowCount - 1
+				}
+				pipelineTable.Select(newRow, 0)
 			}
 			return nil
 		case 'r': // Run pipeline
-			if itemCount > 0 {
-				if selectedPipeline, ok := pipelineIndexMap[currentIndex]; ok && selectedPipeline != nil {
+			if rowCount > 1 && currentRow > 0 {
+				if selectedPipeline, ok := pipelineRowMap[currentRow]; ok && selectedPipeline != nil {
 					currentPipelineIDForRun = selectedPipeline.PipelineID
 					// Show confirmation or directly run
 					ShowModal("Run Pipeline?", fmt.Sprintf("Run '%s'?", selectedPipeline.Name), []string{"Run", "Cancel"},
@@ -313,13 +636,24 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		}
 		switch event.Key() {
 		case tcell.KeyEnter:
-			// TODO: Show pipeline details/runs view (future subtask)
+			if rowCount > 1 && currentRow > 0 {
+				if selectedPipeline, ok := pipelineRowMap[currentRow]; ok && selectedPipeline != nil {
+					currentPipelineIDForRun = selectedPipeline.PipelineID
+					currentPipelineName = selectedPipeline.Name
+					isRunHistoryActive = true
+
+					// Update run history table and switch to it
+					updateRunHistoryTable(runHistoryTable, app, apiClient, orgId, selectedPipeline.PipelineID, selectedPipeline.Name)
+					mainPages.SwitchToPage("run_history")
+					app.SetFocus(runHistoryTable)
+				}
+			}
 			return nil
 		case tcell.KeyEscape:
 			if currentViewMode == "pipelines_in_group" {
 				currentViewMode = "group_list"
 				mainPages.SwitchToPage("groups")
-				app.SetFocus(groupList)
+				app.SetFocus(groupTable)
 				return nil
 			}
 		}
@@ -329,46 +663,58 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	// --- Event Handlers for searchInput ---
 	searchInput.SetChangedFunc(func(text string) {
 		currentSearchQuery = text
-		updatePipelineList(pipelineList, app, searchInput)
+		updatePipelineTable(pipelineTable, app, searchInput)
+		// Update status info
+		statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 	})
 	searchInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter || key == tcell.KeyDown || key == tcell.KeyUp {
-			app.SetFocus(pipelineList)
+			app.SetFocus(pipelineTable)
 		} else if key == tcell.KeyEscape {
 			currentSearchQuery = ""
 			searchInput.SetText("")
-			updatePipelineList(pipelineList, app, searchInput)
-			app.SetFocus(pipelineList)
+			updatePipelineTable(pipelineTable, app, searchInput)
+			statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
+			app.SetFocus(pipelineTable)
 		}
 	})
 
-	// --- Event Handlers for groupList ---
-	groupList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		currentIndex := groupList.GetCurrentItem()
-		itemCount := groupList.GetItemCount()
+	// --- Event Handlers for groupTable ---
+	groupTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		currentRow, _ := groupTable.GetSelection()
+		rowCount := groupTable.GetRowCount()
 		switch event.Rune() {
 		case 'j':
-			if itemCount > 0 {
-				groupList.SetCurrentItem((currentIndex + 1) % itemCount)
+			if rowCount > 1 {
+				newRow := currentRow + 1
+				if newRow >= rowCount {
+					newRow = 1 // Skip header row
+				}
+				groupTable.Select(newRow, 0)
 			}
 			return nil
 		case 'k':
-			if itemCount > 0 {
-				groupList.SetCurrentItem((currentIndex - 1 + itemCount) % itemCount)
+			if rowCount > 1 {
+				newRow := currentRow - 1
+				if newRow < 1 {
+					newRow = rowCount - 1
+				}
+				groupTable.Select(newRow, 0)
 			}
 			return nil
 		}
 		if event.Key() == tcell.KeyEnter {
-			if itemCount > 0 {
-				if selectedGroup, ok := groupIndexMap[currentIndex]; ok && selectedGroup != nil {
+			if rowCount > 1 && currentRow > 0 {
+				if selectedGroup, ok := groupRowMap[currentRow]; ok && selectedGroup != nil {
 					selectedGroupID = selectedGroup.GroupID
 					selectedGroupName = selectedGroup.Name
 					currentViewMode = "pipelines_in_group"
 					currentSearchQuery = ""
 					searchInput.SetText("")
-					updatePipelineList(pipelineList, app, searchInput)
+					updatePipelineTable(pipelineTable, app, searchInput)
+					statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 					mainPages.SwitchToPage("pipelines")
-					app.SetFocus(pipelineList)
+					app.SetFocus(pipelineTable)
 				}
 			}
 			return nil
@@ -377,9 +723,73 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			currentViewMode = "all_pipelines"
 			selectedGroupID = ""
 			selectedGroupName = ""
-			updatePipelineList(pipelineList, app, searchInput)
+			updatePipelineTable(pipelineTable, app, searchInput)
+			statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 			mainPages.SwitchToPage("pipelines")
-			app.SetFocus(pipelineList)
+			app.SetFocus(pipelineTable)
+			return nil
+		}
+		return event
+	})
+
+	// --- Event Handlers for runHistoryTable ---
+	runHistoryTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		currentRow, _ := runHistoryTable.GetSelection()
+		rowCount := runHistoryTable.GetRowCount()
+
+		switch event.Rune() {
+		case 'j':
+			if rowCount > 1 {
+				newRow := currentRow + 1
+				if newRow >= rowCount {
+					newRow = 1 // Skip header row
+				}
+				runHistoryTable.Select(newRow, 0)
+			}
+			return nil
+		case 'k':
+			if rowCount > 1 {
+				newRow := currentRow - 1
+				if newRow < 1 {
+					newRow = rowCount - 1
+				}
+				runHistoryTable.Select(newRow, 0)
+			}
+			return nil
+		}
+		switch event.Key() {
+		case tcell.KeyEnter:
+			if rowCount > 1 && currentRow > 0 {
+				if selectedRun, ok := runHistoryRowMap[currentRow]; ok && selectedRun != nil {
+					currentRunID = selectedRun.RunID
+					isLogViewActive = true
+
+					// Switch to log view and fetch logs
+					go func() {
+						app.QueueUpdateDraw(func() {
+							logViewTextView.SetText(fmt.Sprintf("Fetching logs for run %s...", currentRunID))
+							mainPages.SwitchToPage("logs")
+							app.SetFocus(logViewTextView)
+						})
+
+						// Fetch logs for this run
+						logs, err := apiClient.GetPipelineRunLogs(orgId, currentPipelineIDForRun, currentRunID)
+						app.QueueUpdateDraw(func() {
+							if err != nil {
+								logViewTextView.SetText(fmt.Sprintf("Error fetching logs: %v\n\nNote: Log fetching may require additional JobID parameter which is not yet implemented.", err))
+							} else {
+								logViewTextView.SetText(logs)
+							}
+							logViewTextView.ScrollToEnd()
+						})
+					}()
+				}
+			}
+			return nil
+		case tcell.KeyEscape:
+			isRunHistoryActive = false
+			mainPages.SwitchToPage("pipelines")
+			app.SetFocus(pipelineTable)
 			return nil
 		}
 		return event
@@ -389,8 +799,15 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	logViewTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' {
 			isLogViewActive = false
-			mainPages.SwitchToPage("pipelines")
-			app.SetFocus(pipelineList) // Or pipelineListFlexView
+			if isRunHistoryActive {
+				// Return to run history if we came from there
+				mainPages.SwitchToPage("run_history")
+				app.SetFocus(runHistoryTable)
+			} else {
+				// Return to pipelines
+				mainPages.SwitchToPage("pipelines")
+				app.SetFocus(pipelineTable)
+			}
 			return nil
 		}
 		// Allow default scrolling for arrow keys, PageUp/Down etc.
@@ -410,31 +827,33 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			if currentPage == "pipelines" {
 				currentStatusIndex = (currentStatusIndex + 1) % len(statusesToCycle)
 				currentStatusFilter = statusesToCycle[currentStatusIndex]
-				updatePipelineList(pipelineList, app, searchInput)
+				updatePipelineTable(pipelineTable, app, searchInput)
+				statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 				return nil
 			}
 		case tcell.KeyCtrlG:
 			if currentPage == "pipelines" {
 				currentViewMode = "group_list"
-				if groupList.GetItemCount() > 0 {
-					groupList.SetCurrentItem(0)
+				if groupTable.GetRowCount() > 1 {
+					groupTable.Select(1, 0) // Select first data row
 				}
 				mainPages.SwitchToPage("groups")
-				app.SetFocus(groupList)
+				app.SetFocus(groupTable)
 			} else if currentPage == "groups" {
 				currentViewMode = "all_pipelines"
 				selectedGroupID = ""
 				selectedGroupName = ""
-				updatePipelineList(pipelineList, app, searchInput)
+				updatePipelineTable(pipelineTable, app, searchInput)
+				statusInfo.SetText(fmt.Sprintf("Status Filter: %s (Ctrl+S to cycle)", currentStatusFilter))
 				mainPages.SwitchToPage("pipelines")
-				app.SetFocus(pipelineList)
+				app.SetFocus(pipelineTable)
 			}
 			return nil
 		}
 		return event
 	})
 
-	app.SetFocus(pipelineListFlexView)
+	app.SetFocus(pipelineTable)
 
 	return mainPages
 }

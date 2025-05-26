@@ -11,17 +11,33 @@ The [internal/api/client.go](mdc:internal/api/client.go) file contains the core 
 
 ### Core Types
 
-- **`Client`** - Main API client wrapping the Aliyun DevOps SDK client
+- **`Client`** - Main API client supporting both SDK and HTTP-based authentication
 - **`Pipeline`** - Represents a DevOps pipeline with metadata
 - **`PipelineRun`** - Represents a single execution of a pipeline
 - **`PipelineGroup`** - Represents a group of related pipelines
 
+### Client Fields
+
+- **`sdkClient`** - Aliyun DevOps SDK client (for AccessKey authentication)
+- **`httpClient`** - HTTP client (for personal access token authentication)
+- **`endpoint`** - API endpoint for token-based requests
+- **`personalAccessToken`** - Personal access token for authentication
+- **`useToken`** - Boolean flag indicating authentication method
+
 ### Key Methods
 
+#### Client Creation
+- `NewClient(accessKeyId, accessKeySecret, regionId string) (*Client, error)` - Create client with AccessKey authentication
+- `NewClientWithToken(endpoint, personalAccessToken string) (*Client, error)` - Create client with personal access token authentication
+
 #### Pipeline Management
-- `ListPipelines(organizationId string) ([]Pipeline, error)` - Fetch all pipelines for an organization
+- `ListPipelines(organizationId string) ([]Pipeline, error)` - Fetch all pipelines for an organization (supports both auth methods)
+- `listPipelinesWithToken(organizationId string) ([]Pipeline, error)` - Internal method for token-based pipeline listing
 - `GetPipelineDetails(organizationId, pipelineId string) (*Pipeline, error)` - Get detailed pipeline info
-- `RunPipeline(organizationId, pipelineId string, params map[string]string) (*PipelineRun, error)` - Trigger pipeline execution
+- `RunPipeline(organizationId, pipelineId string, params map[string]string) (*PipelineRun, error)` - Trigger pipeline
+
+#### HTTP Client Methods
+- `makeTokenRequest(method, path string, body interface{}) (map[string]interface{}, error)` - Make authenticated HTTP requests with personal access token execution
 
 #### Pipeline Run Management  
 - `ListPipelineRuns(organizationId, pipelineId string) ([]PipelineRun, error)` - Get pipeline execution history

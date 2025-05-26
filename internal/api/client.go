@@ -24,7 +24,9 @@ type Pipeline struct {
 	Name          string    `json:"name"`
 	Status        string    `json:"status"`        // e.g., RUNNING, SUCCESS, FAILED, CANCELED
 	LastRunStatus string    `json:"lastRunStatus"` // Status of the most recent run
+	LastRunTime   time.Time `json:"lastRunTime"`   // Time of the most recent run
 	Creator       string    `json:"creator"`
+	CreatorName   string    `json:"creatorName"` // Creator display name
 	Modifier      string    `json:"modifier"`
 	CreateTime    time.Time `json:"createTime"`
 	UpdateTime    time.Time `json:"updateTime"`
@@ -564,11 +566,151 @@ func getNumberField(data map[string]interface{}, key string) float64 {
 
 // ListPipelineRuns retrieves a list of runs for a specific pipeline.
 func (c *Client) ListPipelineRuns(organizationId string, pipelineId string) ([]PipelineRun, error) {
-	// request := devops_rdc.CreateListPipelineRunsRequest()
-	// request.OrgId = organizationId
-	// request.PipelineId = pipelineId
-	// ...
-	return nil, fmt.Errorf("not implemented: ListPipelineRuns")
+	if organizationId == "" {
+		return nil, fmt.Errorf("organizationId is required for ListPipelineRuns")
+	}
+	if pipelineId == "" {
+		return nil, fmt.Errorf("pipelineId is required for ListPipelineRuns")
+	}
+
+	// Use different methods based on authentication type
+	if c.useToken {
+		return c.listPipelineRunsWithToken(organizationId, pipelineId)
+	}
+
+	// TODO: Implement SDK-based method for AccessKey authentication
+	return nil, fmt.Errorf("ListPipelineRuns with AccessKey authentication not implemented yet")
+}
+
+// listPipelineRunsWithToken retrieves pipeline runs using personal access token authentication
+func (c *Client) listPipelineRunsWithToken(organizationId, pipelineId string) ([]PipelineRun, error) {
+	// Based on Aliyun DevOps API pattern, pipeline runs endpoint might be:
+	// Try different possible endpoints for pipeline runs
+	possiblePaths := []string{
+		fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/runs", organizationId, pipelineId),
+		fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/executions", organizationId, pipelineId),
+		fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/instances", organizationId, pipelineId),
+	}
+
+	var lastErr error
+	for _, path := range possiblePaths {
+		// Make the request and get raw response
+		url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create request: %w", err)
+			continue
+		}
+
+		req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to make request: %w", err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", err)
+			continue
+		}
+
+		// Log response for debugging
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			debugLogger.Printf("Trying pipeline runs endpoint: %s", url)
+			debugLogger.Printf("Response Status: %d", resp.StatusCode)
+			debugLogger.Printf("Response Body: %.500s", string(respBody))
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+			continue
+		}
+
+		// Try to unmarshal as array directly
+		var runItems []map[string]interface{}
+		if err := json.Unmarshal(respBody, &runItems); err != nil {
+			// If direct array parsing fails, try to parse as object with data field
+			var responseObj map[string]interface{}
+			if err2 := json.Unmarshal(respBody, &responseObj); err2 != nil {
+				lastErr = fmt.Errorf("failed to unmarshal response: %w. Response body: %.500s", err, string(respBody))
+				continue
+			}
+
+			// Try to find runs in common data fields
+			if data, ok := responseObj["data"].([]interface{}); ok {
+				runItems = make([]map[string]interface{}, len(data))
+				for i, item := range data {
+					if itemMap, ok := item.(map[string]interface{}); ok {
+						runItems[i] = itemMap
+					}
+				}
+			} else if runs, ok := responseObj["runs"].([]interface{}); ok {
+				runItems = make([]map[string]interface{}, len(runs))
+				for i, item := range runs {
+					if itemMap, ok := item.(map[string]interface{}); ok {
+						runItems[i] = itemMap
+					}
+				}
+			} else {
+				lastErr = fmt.Errorf("no run data found in response from %s", path)
+				continue
+			}
+		}
+
+		var pipelineRuns []PipelineRun
+
+		// Parse each run item
+		for _, runMap := range runItems {
+			var startTime, finishTime time.Time
+			if st, ok := runMap["startTime"].(float64); ok && st > 0 {
+				startTime = time.Unix(int64(st)/1000, 0)
+			}
+			if ft, ok := runMap["finishTime"].(float64); ok && ft > 0 {
+				finishTime = time.Unix(int64(ft)/1000, 0)
+			}
+
+			// Extract run ID
+			var runID string
+			if id, ok := runMap["id"].(string); ok {
+				runID = id
+			} else if id, ok := runMap["id"].(float64); ok {
+				runID = fmt.Sprintf("%.0f", id)
+			} else if id, ok := runMap["runId"].(string); ok {
+				runID = id
+			} else if id, ok := runMap["runId"].(float64); ok {
+				runID = fmt.Sprintf("%.0f", id)
+			}
+
+			pipelineRun := PipelineRun{
+				RunID:       runID,
+				PipelineID:  pipelineId,
+				Status:      getStringField(runMap, "status"),
+				StartTime:   startTime,
+				FinishTime:  finishTime,
+				TriggerMode: getStringField(runMap, "triggerMode"),
+			}
+
+			if pipelineRun.RunID != "" {
+				pipelineRuns = append(pipelineRuns, pipelineRun)
+			}
+		}
+
+		// If we successfully got data, return it
+		return pipelineRuns, nil
+	}
+
+	// If all endpoints failed, return the last error
+	if lastErr != nil {
+		return nil, fmt.Errorf("all pipeline runs endpoints failed, last error: %w", lastErr)
+	}
+
+	return nil, fmt.Errorf("no valid pipeline runs endpoint found")
 }
 
 // ListPipelineGroups retrieves a list of pipeline groups (projects) for an organization.
@@ -856,99 +998,166 @@ func (c *Client) listPipelinesWithToken(organizationId string) ([]Pipeline, erro
 	// Based on official Aliyun DevOps API documentation:
 	// https://help.aliyun.com/zh/yunxiao/developer-reference/listpipelines-get-a-list-of-pipelines
 	// GET https://{domain}/oapi/v1/flow/organizations/{organizationId}/pipelines
-	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines", organizationId)
 
-	// The API returns a direct JSON array of pipeline objects
-	var pipelines []Pipeline
+	var allPipelines []Pipeline
+	page := 1
+	perPage := 30 // Maximum per page according to API docs
 
-	// The response should be a direct array based on the logs
-	// Check if response is actually an array (which would be in a slice, not map)
-	// Since makeTokenRequest returns map[string]interface{}, but the API returns an array,
-	// we need to handle this differently
+	for {
+		path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines?page=%d&perPage=%d", organizationId, page, perPage)
 
-	// Re-make the request and get raw response
-	url := fmt.Sprintf("https://%s%s", c.endpoint, path)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("x-yunxiao-token", c.personalAccessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	// Try to unmarshal as array directly
-	var pipelineItems []map[string]interface{}
-	if err := json.Unmarshal(respBody, &pipelineItems); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response as array: %w. Response body: %.500s", err, string(respBody))
-	}
-
-	// Parse each pipeline item
-	for _, pipelineMap := range pipelineItems {
-		var createTime, updateTime time.Time
-		if ct, ok := pipelineMap["createTime"].(float64); ok && ct > 0 {
-			createTime = time.Unix(int64(ct)/1000, 0)
-		}
-		if ut, ok := pipelineMap["updateTime"].(float64); ok && ut > 0 {
-			updateTime = time.Unix(int64(ut)/1000, 0)
+		// Make the request and get raw response
+		url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 
-		// Extract pipeline ID - it might be string or number
-		var pipelineID string
-		if id, ok := pipelineMap["id"].(string); ok {
-			pipelineID = id
-		} else if id, ok := pipelineMap["id"].(float64); ok {
-			pipelineID = fmt.Sprintf("%.0f", id)
-		} else if id, ok := pipelineMap["pipelineId"].(string); ok {
-			pipelineID = id
-		} else if id, ok := pipelineMap["pipelineId"].(float64); ok {
-			pipelineID = fmt.Sprintf("%.0f", id)
+		req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to make request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
 
-		// Extract creator information
-		var creator string
-		if creatorObj, ok := pipelineMap["creator"].(map[string]interface{}); ok {
-			creator = getStringField(creatorObj, "username")
-			if creator == "" {
+		// Log response details for debugging (only in debug mode)
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			debugLogger.Printf("Request URL: %s", url)
+			debugLogger.Printf("Response Status: %d", resp.StatusCode)
+			debugLogger.Printf("Response Headers: %v", resp.Header)
+			debugLogger.Printf("Response Body (first 1000 chars): %.1000s", string(respBody))
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		// According to API docs, response is a direct array
+		var pipelineItems []map[string]interface{}
+		if err := json.Unmarshal(respBody, &pipelineItems); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal response as array: %w. Response body: %.500s", err, string(respBody))
+		}
+
+		// If no items found, we've reached the end
+		if len(pipelineItems) == 0 {
+			break
+		}
+
+		// Check pagination headers to determine if there are more pages
+		totalPagesHeader := resp.Header.Get("x-total-pages")
+		currentPageHeader := resp.Header.Get("x-page")
+
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			debugLogger.Printf("Pagination info - Current page: %s, Total pages: %s, Items in this page: %d", currentPageHeader, totalPagesHeader, len(pipelineItems))
+		}
+
+		// Parse each pipeline item
+		for _, pipelineMap := range pipelineItems {
+			var createTime, updateTime, lastRunTime time.Time
+			if ct, ok := pipelineMap["createTime"].(float64); ok && ct > 0 {
+				createTime = time.Unix(int64(ct)/1000, 0)
+			}
+			if ut, ok := pipelineMap["updateTime"].(float64); ok && ut > 0 {
+				updateTime = time.Unix(int64(ut)/1000, 0)
+			}
+
+			// Extract pipeline ID - it might be string or number
+			var pipelineID string
+			if id, ok := pipelineMap["id"].(string); ok {
+				pipelineID = id
+			} else if id, ok := pipelineMap["id"].(float64); ok {
+				pipelineID = fmt.Sprintf("%.0f", id)
+			} else if id, ok := pipelineMap["pipelineId"].(string); ok {
+				pipelineID = id
+			} else if id, ok := pipelineMap["pipelineId"].(float64); ok {
+				pipelineID = fmt.Sprintf("%.0f", id)
+			}
+
+			// Extract creator information
+			var creator, creatorName string
+			if creatorObj, ok := pipelineMap["creator"].(map[string]interface{}); ok {
 				creator = getStringField(creatorObj, "id")
+				creatorName = getStringField(creatorObj, "username")
+				if creatorName == "" {
+					creatorName = getStringField(creatorObj, "name")
+				}
+				if creatorName == "" {
+					creatorName = getStringField(creatorObj, "displayName")
+				}
+			}
+			if creator == "" {
+				creator = getStringField(pipelineMap, "creatorAccountId")
+			}
+			if creatorName == "" {
+				creatorName = creator // Fallback to ID if name not available
+			}
+
+			// Extract last run information
+			var lastRunStatus string
+			if lastRunObj, ok := pipelineMap["lastRun"].(map[string]interface{}); ok {
+				lastRunStatus = getStringField(lastRunObj, "status")
+				if lrt, ok := lastRunObj["finishTime"].(float64); ok && lrt > 0 {
+					lastRunTime = time.Unix(int64(lrt)/1000, 0)
+				} else if lrt, ok := lastRunObj["startTime"].(float64); ok && lrt > 0 {
+					lastRunTime = time.Unix(int64(lrt)/1000, 0)
+				}
+			}
+			// Try alternative field names for last run status
+			if lastRunStatus == "" {
+				lastRunStatus = getStringField(pipelineMap, "lastRunStatus")
+			}
+			if lastRunStatus == "" {
+				lastRunStatus = getStringField(pipelineMap, "latestRunStatus")
+			}
+
+			pipeline := Pipeline{
+				PipelineID:    pipelineID,
+				Name:          getStringField(pipelineMap, "name"),
+				Status:        getStringField(pipelineMap, "status"),
+				LastRunStatus: lastRunStatus,
+				LastRunTime:   lastRunTime,
+				Creator:       creator,
+				CreatorName:   creatorName,
+				Modifier:      getStringField(pipelineMap, "modifierAccountId"),
+				CreateTime:    createTime,
+				UpdateTime:    updateTime,
+			}
+
+			if pipeline.PipelineID != "" {
+				allPipelines = append(allPipelines, pipeline)
 			}
 		}
-		if creator == "" {
-			creator = getStringField(pipelineMap, "creatorAccountId")
+
+		// Check if there are more pages using response headers
+		totalPagesStr := resp.Header.Get("x-total-pages")
+		currentPageStr := resp.Header.Get("x-page")
+
+		if totalPagesStr != "" && currentPageStr != "" {
+			// Use header information for pagination
+			if currentPageStr == totalPagesStr {
+				// We've reached the last page
+				break
+			}
+		} else {
+			// Fallback: if we got fewer items than perPage, we've reached the end
+			if len(pipelineItems) < perPage {
+				break
+			}
 		}
 
-		pipeline := Pipeline{
-			PipelineID: pipelineID,
-			Name:       getStringField(pipelineMap, "name"),
-			Status:     getStringField(pipelineMap, "status"),
-			Creator:    creator,
-			Modifier:   getStringField(pipelineMap, "modifierAccountId"),
-			CreateTime: createTime,
-			UpdateTime: updateTime,
-		}
-
-		if pipeline.PipelineID != "" {
-			pipelines = append(pipelines, pipeline)
-		}
+		page++
 	}
 
-	return pipelines, nil
+	return allPipelines, nil
 }
 
 // getPipelineRunWithToken retrieves pipeline run details using personal access token authentication
