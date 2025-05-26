@@ -81,6 +81,14 @@ func ShowModal(title, text string, buttons []string, doneFunc func(buttonIndex i
 	modal.SetText(text)
 	modal.SetTitle(title)
 	modal.AddButtons(buttons)
+
+	// Set transparent background for modal
+	modal.SetBackgroundColor(tcell.ColorDefault)
+	modal.SetTextColor(tcell.ColorWhite)
+	modal.SetButtonBackgroundColor(tcell.ColorDefault)
+	modal.SetButtonTextColor(tcell.ColorWhite)
+	modal.SetBorderColor(tcell.ColorWhite)
+
 	modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 		HideModal() // Hide modal first
 		if doneFunc != nil {
