@@ -44,6 +44,12 @@ var (
 
 	// Maps to store run history references
 	runHistoryRowMap = make(map[int]*api.PipelineRun)
+
+	// Pagination state for run history
+	currentRunHistoryPage = 1
+	runHistoryPerPage     = 10
+	totalRunHistoryPages  = 1
+	currentRunHistoryData []api.PipelineRun
 )
 
 // ShowModal displays a modal dialog.
@@ -309,7 +315,11 @@ func updateGroupTable(table *tview.Table, app *tview.Application) {
 // updateRunHistoryTable updates the run history table for a specific pipeline
 func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient *api.Client, orgId, pipelineId, pipelineName string) {
 	table.Clear()
-	table.SetTitle(fmt.Sprintf("Run History - %s", pipelineName))
+
+	// Update title with pagination info
+	title := fmt.Sprintf("Run History - %s (Page %d/%d) [/] to navigate, 0 to go to first page",
+		pipelineName, currentRunHistoryPage, totalRunHistoryPages)
+	table.SetTitle(title)
 
 	// Set table headers
 	headers := []string{"#", "Status", "Trigger", "Start Time", "Finish Time", "Duration"}
@@ -325,7 +335,7 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 	// Clear the run history row map
 	runHistoryRowMap = make(map[int]*api.PipelineRun)
 
-	// Fetch pipeline runs
+	// Fetch pipeline runs for current page
 	runs, err := apiClient.ListPipelineRuns(orgId, pipelineId)
 	if err != nil {
 		// Show error message
@@ -340,7 +350,31 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 		return
 	}
 
-	if len(runs) == 0 {
+	// Store all runs data for pagination
+	currentRunHistoryData = runs
+
+	// Calculate pagination
+	totalRuns := len(runs)
+	if totalRuns == 0 {
+		totalRunHistoryPages = 1
+	} else {
+		totalRunHistoryPages = (totalRuns + runHistoryPerPage - 1) / runHistoryPerPage
+	}
+
+	// Ensure current page is valid
+	if currentRunHistoryPage > totalRunHistoryPages {
+		currentRunHistoryPage = totalRunHistoryPages
+	}
+	if currentRunHistoryPage < 1 {
+		currentRunHistoryPage = 1
+	}
+
+	// Update title with correct pagination info
+	title = fmt.Sprintf("Run History - %s (Page %d/%d) [/] to navigate, 0 to go to first page",
+		pipelineName, currentRunHistoryPage, totalRunHistoryPages)
+	table.SetTitle(title)
+
+	if totalRuns == 0 {
 		// Show "no data" message
 		cell := tview.NewTableCell("No run history found.").
 			SetTextColor(tcell.ColorGray).
@@ -353,16 +387,27 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 		return
 	}
 
+	// Calculate start and end indices for current page
+	startIdx := (currentRunHistoryPage - 1) * runHistoryPerPage
+	endIdx := startIdx + runHistoryPerPage
+	if endIdx > totalRuns {
+		endIdx = totalRuns
+	}
+
+	// Get runs for current page
+	pageRuns := runs[startIdx:endIdx]
+
 	// Populate the table with runs
-	for i, run := range runs {
+	for i, run := range pageRuns {
 		runCopy := run // Important: capture range variable for reference
 		row := i + 1   // +1 because row 0 is header
 
 		// Store the run object in our map
 		runHistoryRowMap[row] = &runCopy
 
-		// Run number (reverse order, latest first)
-		runNumCell := tview.NewTableCell(fmt.Sprintf("#%d", len(runs)-i)).
+		// Run number (reverse order, latest first) - adjust for pagination
+		globalRunIndex := startIdx + i
+		runNumCell := tview.NewTableCell(fmt.Sprintf("#%d", totalRuns-globalRunIndex)).
 			SetTextColor(tcell.ColorLightBlue).
 			SetAlign(tview.AlignLeft).
 			SetBackgroundColor(tcell.ColorDefault)
@@ -515,7 +560,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Run history help info
 	runHistoryHelpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=view logs, Esc=back to pipelines, q=quit").
+		SetText("Keys: j/k=move, Enter=view logs, [/]=prev/next page, 0=first page, Esc=back to pipelines, q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	runHistoryHelpInfo.SetBackgroundColor(tcell.ColorDefault)
@@ -642,6 +687,10 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					currentPipelineName = selectedPipeline.Name
 					isRunHistoryActive = true
 
+					// Reset pagination state when entering run history
+					currentRunHistoryPage = 1
+					totalRunHistoryPages = 1
+
 					// Update run history table and switch to it
 					updateRunHistoryTable(runHistoryTable, app, apiClient, orgId, selectedPipeline.PipelineID, selectedPipeline.Name)
 					mainPages.SwitchToPage("run_history")
@@ -754,6 +803,36 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					newRow = rowCount - 1
 				}
 				runHistoryTable.Select(newRow, 0)
+			}
+			return nil
+		case '[':
+			// Previous page
+			if currentRunHistoryPage > 1 {
+				currentRunHistoryPage--
+				updateRunHistoryTable(runHistoryTable, app, apiClient, orgId, currentPipelineIDForRun, currentPipelineName)
+				if runHistoryTable.GetRowCount() > 1 {
+					runHistoryTable.Select(1, 0) // Select first data row
+				}
+			}
+			return nil
+		case ']':
+			// Next page
+			if currentRunHistoryPage < totalRunHistoryPages {
+				currentRunHistoryPage++
+				updateRunHistoryTable(runHistoryTable, app, apiClient, orgId, currentPipelineIDForRun, currentPipelineName)
+				if runHistoryTable.GetRowCount() > 1 {
+					runHistoryTable.Select(1, 0) // Select first data row
+				}
+			}
+			return nil
+		case '0':
+			// Go to first page
+			if currentRunHistoryPage != 1 {
+				currentRunHistoryPage = 1
+				updateRunHistoryTable(runHistoryTable, app, apiClient, orgId, currentPipelineIDForRun, currentPipelineName)
+				if runHistoryTable.GetRowCount() > 1 {
+					runHistoryTable.Select(1, 0) // Select first data row
+				}
 			}
 			return nil
 		}

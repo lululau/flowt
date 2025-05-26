@@ -1,0 +1,20 @@
+# Aliyun DevOps Pipeline TUI Configuration
+# Copy this file to flowt.yml and fill in your credentials
+
+# Authentication method: choose either "access_key" or "personal_access_token"
+auth_method: "personal_access_token"
+
+# For Personal Access Token authentication (recommended)
+personal_access_token: "your_personal_access_token_here"
+endpoint: "openapi-rdc.aliyuncs.com"
+
+# For AccessKey authentication (alternative)
+# access_key_id: "your_access_key_id"
+# access_key_secret: "your_access_key_secret"
+# region_id: "cn-hangzhou"
+
+# Organization ID (required)
+organization_id: "your_organization_id_here"
+
+# Debug mode (optional)
+debug: false 
