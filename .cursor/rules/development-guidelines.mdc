@@ -1,0 +1,119 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Development Guidelines
+
+Guidelines for developing and maintaining the Aliyun DevOps Pipelines TUI application.
+
+## Code Organization
+
+### Package Structure
+- **`cmd/`** - Application entry points and main packages
+- **`internal/`** - Private application code not intended for external use
+  - **`api/`** - External API integrations and client code
+  - **`ui/`** - User interface components and presentation logic
+
+### File Naming Conventions
+- Use descriptive names: `client.go` for API client, `components.go` for UI components
+- Keep related functionality in single files when reasonable
+- Separate concerns: API logic in `api/`, UI logic in `ui/`
+
+## Dependencies Management
+
+### Core Dependencies
+- **`github.com/aliyun/alibaba-cloud-sdk-go`** - Aliyun Cloud SDK for API interactions
+- **`github.com/rivo/tview`** - Terminal UI framework
+- **`github.com/gdamore/tcell/v2`** - Terminal cell-based display
+
+### Adding New Dependencies
+1. Use `go get` to add dependencies
+2. Update [go.mod](mdc:go.mod) with specific versions
+3. Run `go mod tidy` to clean up unused dependencies
+4. Document new dependencies and their purpose
+
+## Error Handling Patterns
+
+### API Client Errors
+```go
+// Always wrap errors with context
+if err != nil {
+    return fmt.Errorf("failed to list pipelines: %w", err)
+}
+
+// Validate parameters before API calls
+if organizationId == "" {
+    return nil, fmt.Errorf("organizationId is required")
+}
+```
+
+### UI Error Display
+- Show API errors as list items rather than crashing
+- Use modal dialogs for user-actionable errors
+- Provide clear, actionable error messages
+
+## TUI Development Best Practices
+
+### State Management
+- Use global variables sparingly and document their purpose
+- Initialize state in `NewMainView()` function
+- Reset state appropriately when switching views
+
+### Focus Management
+- Maintain global references for focus restoration after modals
+- Always restore focus to logical components after modal dismissal
+- Test keyboard navigation thoroughly
+
+### Performance Considerations
+- Cache API responses when appropriate (e.g., `allPipelines`, `allPipelineGroups`)
+- Implement efficient filtering without re-fetching data
+- Use `list.Clear()` before repopulating to avoid memory leaks
+
+## Testing Strategy
+
+### Environment Setup
+Required environment variables for testing:
+```bash
+export ALICLOUD_ACCESS_KEY_ID="your-access-key"
+export ALICLOUD_ACCESS_KEY_SECRET="your-secret-key"
+export ALICLOUD_DEVOPS_ORG_ID="your-org-id"
+export ALICLOUD_REGION_ID="cn-hangzhou"  # optional
+```
+
+### Manual Testing Checklist
+- [ ] Pipeline listing and filtering
+- [ ] Search functionality
+- [ ] Status filter cycling
+- [ ] Pipeline group navigation
+- [ ] Pipeline execution
+- [ ] Log viewing
+- [ ] Modal interactions
+- [ ] Keyboard shortcuts
+
+## Code Style
+
+### Go Conventions
+- Follow standard Go formatting (`gofmt`)
+- Use meaningful variable names
+- Add comments for exported functions and complex logic
+- Handle errors explicitly, don't ignore them
+
+### TUI Specific
+- Use consistent color schemes and styling
+- Provide keyboard shortcuts for common actions
+- Ensure responsive layout for different terminal sizes
+- Test with different terminal emulators
+
+## Debugging
+
+### Common Issues
+- **API Authentication**: Verify environment variables are set correctly
+- **Focus Problems**: Check global reference initialization in `NewMainView()`
+- **List Updates**: Ensure `updatePipelineList()` is called after state changes
+- **Modal Issues**: Verify modal is properly added/removed from pages
+
+### Logging
+- Use `fmt.Fprintf(os.Stderr, ...)` for error output
+- Consider adding debug logging for development builds
+- Log API response structures when debugging SDK integration

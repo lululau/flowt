@@ -1,0 +1,43 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Aliyun DevOps Pipelines TUI - Project Overview
+
+This is a Terminal User Interface (TUI) application for managing Aliyun DevOps pipelines, built in Go using the `tview` library for the interface and the Alibaba Cloud SDK for API interactions.
+
+## Project Structure
+
+The project follows Go's standard project layout:
+
+- **Entry Point**: [cmd/aliyun-pipelines-tui/main.go](mdc:cmd/aliyun-pipelines-tui/main.go) - Main application entry point that initializes the API client and TUI
+- **API Layer**: [internal/api/client.go](mdc:internal/api/client.go) - Aliyun DevOps API client with methods for pipeline operations
+- **UI Layer**: [internal/ui/components.go](mdc:internal/ui/components.go) - TUI components and views using tview library
+- **Dependencies**: [go.mod](mdc:go.mod) - Go module definition with required dependencies
+
+## Key Features
+
+- List and filter pipelines by status (ALL, SUCCESS, RUNNING, FAILED, CANCELED)
+- Search pipelines by name or ID
+- View pipeline groups and pipelines within groups
+- Run pipelines with parameters
+- View pipeline run details and logs
+- Stop running pipelines
+- Modal dialogs for confirmations and inputs
+
+## Environment Variables Required
+
+- `ALICLOUD_ACCESS_KEY_ID` - Aliyun access key ID
+- `ALICLOUD_ACCESS_KEY_SECRET` - Aliyun access key secret  
+- `ALICLOUD_DEVOPS_ORG_ID` - DevOps organization ID
+- `ALICLOUD_REGION_ID` - Region (defaults to "cn-hangzhou")
+
+## Architecture
+
+The application uses a clean architecture with separation of concerns:
+- **main.go** handles initialization and environment setup
+- **api package** provides a clean interface to Aliyun DevOps APIs
+- **ui package** manages all TUI components and user interactions
+
+The TUI supports keyboard navigation with shortcuts like 'q' to quit, Ctrl+C to exit, and numbered shortcuts for list items.

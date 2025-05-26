@@ -1,0 +1,86 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# UI Components Guide
+
+The [internal/ui/components.go](mdc:internal/ui/components.go) file contains all TUI components and user interface logic using the `tview` library.
+
+## Architecture Overview
+
+### Global State Management
+The UI uses global variables to manage application state:
+- `allPipelines` - Complete list of pipelines from API
+- `allPipelineGroups` - Complete list of pipeline groups
+- `currentViewMode` - Current view ("all_pipelines", "group_list", "pipelines_in_group")
+- `selectedGroupID/selectedGroupName` - Currently selected pipeline group
+- `currentSearchQuery` - Active search filter
+- `currentStatusFilter` - Active status filter (ALL, SUCCESS, RUNNING, FAILED, CANCELED)
+
+### Key Components
+
+#### Main View Structure
+- **`NewMainView()`** - Creates the main application layout with all components
+- **Pipeline List** - `tview.List` showing filtered pipelines with shortcuts
+- **Search Input** - `tview.InputField` for filtering pipelines by name/ID
+- **Group List** - `tview.List` for browsing pipeline groups
+- **Log View** - `tview.TextView` for displaying pipeline run logs
+
+#### Modal System
+- **`ShowModal()`** - Displays modal dialogs for confirmations and inputs
+- **`HideModal()`** - Removes modal and restores focus to appropriate component
+- Uses global references (`mainPagesGlobal`, `appGlobal`) for modal management
+
+### Filtering and Search
+
+#### Multi-level Filtering
+The `updatePipelineList()` function applies filters in sequence:
+1. **Group Filter** - Show only pipelines in selected group (simulated by name matching)
+2. **Search Filter** - Case-insensitive matching on pipeline name and ID
+3. **Status Filter** - Filter by pipeline status (ALL, SUCCESS, RUNNING, etc.)
+
+#### Status Cycling
+- `statusesToCycle` array defines available status filters
+- `currentStatusIndex` tracks current position in cycle
+- Users can cycle through statuses with keyboard shortcuts
+
+### Navigation and Interaction
+
+#### Keyboard Shortcuts
+- **Number keys (1-9)** - Quick selection of list items
+- **Ctrl+F** - Focus search input
+- **q** - Quit application (handled in main.go)
+- **Ctrl+C** - Exit application (handled in main.go)
+
+#### View Modes
+- **"all_pipelines"** - Show all pipelines with filtering
+- **"group_list"** - Show pipeline groups for selection
+- **"pipelines_in_group"** - Show pipelines within selected group
+
+### Log Viewing System
+- `isLogViewActive` - Tracks if log view is currently displayed
+- `currentRunID/currentPipelineIDForRun` - Track current pipeline run context
+- `logViewTextView` - Text component for displaying logs
+- `logPage` - Flex layout container for log view
+
+## Implementation Patterns
+
+### List Population
+```go
+// Clear and repopulate list with filtered items
+list.Clear()
+for i, item := range filteredItems {
+    list.AddItem(mainText, secondaryText, shortcut, nil)
+    list.SetItemReference(list.GetItemCount()-1, item)
+}
+```
+
+### Focus Management
+Global references enable proper focus restoration after modal interactions:
+```go
+appGlobal.SetFocus(targetComponent)
+```
+
+### Error Handling in UI
+API errors are displayed as list items or modal dialogs rather than crashing the application.

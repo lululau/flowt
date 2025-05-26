@@ -1,0 +1,66 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# API Client Guide
+
+The [internal/api/client.go](mdc:internal/api/client.go) file contains the core API client for interacting with Aliyun DevOps services.
+
+## Client Structure
+
+### Core Types
+
+- **`Client`** - Main API client wrapping the Aliyun DevOps SDK client
+- **`Pipeline`** - Represents a DevOps pipeline with metadata
+- **`PipelineRun`** - Represents a single execution of a pipeline
+- **`PipelineGroup`** - Represents a group of related pipelines
+
+### Key Methods
+
+#### Pipeline Management
+- `ListPipelines(organizationId string) ([]Pipeline, error)` - Fetch all pipelines for an organization
+- `GetPipelineDetails(organizationId, pipelineId string) (*Pipeline, error)` - Get detailed pipeline info
+- `RunPipeline(organizationId, pipelineId string, params map[string]string) (*PipelineRun, error)` - Trigger pipeline execution
+
+#### Pipeline Run Management  
+- `ListPipelineRuns(organizationId, pipelineId string) ([]PipelineRun, error)` - Get pipeline execution history
+- `GetPipelineRun(organizationId, pipelineId, runId string) (*PipelineRun, error)` - Get specific run details
+- `StopPipelineRun(organizationId, pipelineId, runId string) error` - Stop a running pipeline
+- `GetPipelineRunLogs(organizationId, pipelineId, runId string) (string, error)` - Fetch execution logs
+
+#### Group Management
+- `ListPipelineGroups(organizationId string) ([]PipelineGroup, error)` - Get all pipeline groups
+
+## Implementation Notes
+
+### SDK Integration
+- Uses `github.com/aliyun/alibaba-cloud-sdk-go/services/devops-rdc` for API calls
+- Handles authentication via access key credentials
+- Supports multiple regions (defaults to "cn-hangzhou")
+
+### Response Parsing
+- API responses use dynamic JSON parsing due to SDK's `map[string]interface{}` structure
+- Helper functions `getStringField()` and `getNumberField()` safely extract typed values
+- Time fields are converted from Unix milliseconds to Go `time.Time`
+
+### Error Handling
+- Validates required parameters before API calls
+- Checks API response success flags
+- Provides detailed error messages with context
+
+## Usage Pattern
+
+```go
+// Initialize client
+client, err := api.NewClient(accessKeyId, accessKeySecret, regionId)
+if err != nil {
+    return fmt.Errorf("failed to create client: %w", err)
+}
+
+// Use client methods
+pipelines, err := client.ListPipelines(orgId)
+if err != nil {
+    return fmt.Errorf("failed to list pipelines: %w", err)
+}
+```
