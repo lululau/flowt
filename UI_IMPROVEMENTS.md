@@ -89,9 +89,43 @@ case 'q':
 - 保持原有的分页功能
 - 保持原有的键盘导航功能
 
+## 最新修复 (v1.2.0)
+
+### 问题修复
+1. **搜索框背景色**: 添加了 `SetLabelColor()` 和 `SetFieldTextColor()` 确保搜索框完全透明
+2. **分页大小**: Run History 表格分页大小从 10 改为 30
+3. **小写q键行为**: 修复了小写q会退出程序的问题
+   - 在各个表格的事件处理器中添加了'q'键处理
+   - 确保'q'键在表格级别被处理，不会传递到全局处理器
+   - 在搜索框中可以正常输入'q'字符
+
+### 技术实现
+```go
+// 搜索框透明背景
+searchInput.SetBackgroundColor(tcell.ColorDefault)
+searchInput.SetFieldBackgroundColor(tcell.ColorDefault)
+searchInput.SetLabelColor(tcell.ColorWhite)
+searchInput.SetFieldTextColor(tcell.ColorWhite)
+
+// 分页大小调整
+runHistoryPerPage = 30
+
+// 表格级别的'q'键处理
+case 'q':
+    // Back to pipelines view
+    isRunHistoryActive = false
+    mainPages.SwitchToPage("pipelines")
+    app.SetFocus(pipelineTable)
+    return nil
+```
+
 ## 测试建议
 
 1. 测试流水线列表的显示和搜索功能
-2. 测试 Run History 表格的分页和列宽显示
-3. 测试所有快捷键的行为是否符合预期
-4. 测试在不同终端尺寸下的显示效果 
+2. 测试 Run History 表格的分页和列宽显示（每页30条记录）
+3. 测试所有快捷键的行为是否符合预期：
+   - 小写'q'应该返回上一级界面，不退出程序
+   - 大写'Q'应该退出程序
+   - 在搜索框中可以正常输入'q'字符
+4. 测试在不同终端尺寸下的显示效果
+5. 测试搜索框的背景色是否完全透明 

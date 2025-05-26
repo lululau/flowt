@@ -44,7 +44,7 @@ var (
 
 	// Pagination state for run history
 	currentRunHistoryPage = 1
-	runHistoryPerPage     = 10
+	runHistoryPerPage     = 30
 	totalRunHistoryPages  = 1
 	currentRunHistoryData []api.PipelineRun
 )
@@ -465,6 +465,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		SetFieldWidth(0)
 	searchInput.SetBackgroundColor(tcell.ColorDefault)
 	searchInput.SetFieldBackgroundColor(tcell.ColorDefault)
+	searchInput.SetLabelColor(tcell.ColorWhite)
+	searchInput.SetFieldTextColor(tcell.ColorWhite)
 
 	// Help info
 	helpInfo := tview.NewTextView().
@@ -584,6 +586,10 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				pipelineTable.Select(newRow, 0)
 			}
 			return nil
+		case 'q':
+			// Handle 'q' at table level to prevent global handler from catching it
+			// In pipelines view, 'q' should not exit the program
+			return nil
 		case 'r': // Run pipeline
 			if rowCount > 1 && currentRow > 0 {
 				if selectedPipeline, ok := pipelineRowMap[currentRow]; ok && selectedPipeline != nil {
@@ -678,6 +684,12 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		}
 	})
 
+	// Add input capture for search input to handle 'q' key
+	searchInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// Allow 'q' to be typed in search input, don't let global handler catch it
+		return event
+	})
+
 	// --- Event Handlers for groupTable ---
 	groupTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		currentRow, _ := groupTable.GetSelection()
@@ -700,6 +712,15 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				}
 				groupTable.Select(newRow, 0)
 			}
+			return nil
+		case 'q':
+			// Back to pipelines view
+			currentViewMode = "all_pipelines"
+			selectedGroupID = ""
+			selectedGroupName = ""
+			updatePipelineTable(pipelineTable, app, searchInput)
+			mainPages.SwitchToPage("pipelines")
+			app.SetFocus(pipelineTable)
 			return nil
 		}
 		if event.Key() == tcell.KeyEnter {
@@ -752,6 +773,12 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				}
 				runHistoryTable.Select(newRow, 0)
 			}
+			return nil
+		case 'q':
+			// Back to pipelines view
+			isRunHistoryActive = false
+			mainPages.SwitchToPage("pipelines")
+			app.SetFocus(pipelineTable)
 			return nil
 		case '[':
 			// Previous page
@@ -824,7 +851,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// --- Event Handlers for logViewTextView ---
 	logViewTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' {
+		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' || event.Rune() == 'q' {
 			isLogViewActive = false
 			if isRunHistoryActive {
 				// Return to run history if we came from there
