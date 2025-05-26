@@ -47,3 +47,5 @@ go.work
 
 /flowt
 /logs/
+
+/test_pipeline_groups*
