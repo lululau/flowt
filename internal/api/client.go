@@ -48,6 +48,34 @@ type PipelineGroup struct {
 	Name    string `json:"name"`
 }
 
+// Job represents a job within a pipeline run stage
+type Job struct {
+	ID        int64     `json:"id"`
+	JobSign   string    `json:"jobSign"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	StartTime time.Time `json:"startTime"`
+	EndTime   time.Time `json:"endTime"`
+}
+
+// Stage represents a stage in a pipeline run
+type Stage struct {
+	Index string `json:"index"`
+	Name  string `json:"name"`
+	Jobs  []Job  `json:"jobs"`
+}
+
+// PipelineRunDetails represents detailed information about a pipeline run
+type PipelineRunDetails struct {
+	PipelineRunID int64   `json:"pipelineRunId"`
+	PipelineID    int64   `json:"pipelineId"`
+	Status        string  `json:"status"`
+	TriggerMode   int     `json:"triggerMode"`
+	CreateTime    int64   `json:"createTime"`
+	UpdateTime    int64   `json:"updateTime"`
+	Stages        []Stage `json:"stages"`
+}
+
 // Client is a client for interacting with the Aliyun DevOps API.
 type Client struct {
 	sdkClient           *devops_rdc.Client // Changed to devops_rdc
@@ -483,74 +511,259 @@ func (c *Client) GetPipelineRun(organizationId string, pipelineIdStr string, run
 	return pipelineRun, nil
 }
 
-// GetPipelineRunLogs retrieves logs for a specific job within a pipeline run.
-// Note: Aliyun DevOps RDC API (GetPipelineLog) fetches logs per JobId, not directly per RunId.
-// This implementation currently requires a JobId and returns an error if it's not provided,
-// as determining the JobId from a RunId is not yet implemented.
-func (c *Client) GetPipelineRunLogs(organizationId string, pipelineIdStr string, runIdStr string /* TODO: Add jobId string */) (string, error) {
-	// To fully implement this, we would need:
-	// 1. A way to list jobs for a given runId (e.g., from GetPipelineInstanceInfo or a new ListJobsInPipelineRun API).
-	// 2. Then, for each job (or a selected one), call GetPipelineLog.
-	// For now, this function will be a placeholder requiring JobId if we were to call GetPipelineLog.
+// GetPipelineRunDetails retrieves detailed information about a pipeline run including job list
+// Based on: https://help.aliyun.com/zh/yunxiao/developer-reference/getpipelinerun
+func (c *Client) GetPipelineRunDetails(organizationId, pipelineId, pipelineRunId string) (*PipelineRunDetails, error) {
+	if !c.useToken {
+		return nil, fmt.Errorf("GetPipelineRunDetails only supports token-based authentication")
+	}
 
-	// The SDK method is `GetPipelineLog(request *GetPipelineLogRequest)`
-	// It requires `request.JobId` (requests.Integer) and `request.PipelineId` (requests.Integer).
-	// `request.OrgId` is also required.
-	// The response `GetPipelineLogResponse.Object` is `[]Job`. Each `Job` struct would contain log segments.
-	// The internal structure of `Job` (e.g., how logs are stored) is not in the viewed `get_pipeline_log.go`.
+	if organizationId == "" || pipelineId == "" || pipelineRunId == "" {
+		return nil, fmt.Errorf("organizationId, pipelineId, and pipelineRunId are required")
+	}
 
-	return "", fmt.Errorf("not implemented: GetPipelineRunLogs. This API requires a JobId. Please first implement listing jobs for a run to get a JobId, then call GetPipelineLog for that JobId. RunId was: %s, PipelineId: %s", runIdStr, pipelineIdStr)
+	// API endpoint: GET https://{domain}/oapi/v1/flow/organizations/{organizationId}/pipelines/{pipelineId}/runs/{pipelineRunId}
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/runs/%s", organizationId, pipelineId, pipelineRunId)
+	url := fmt.Sprintf("https://%s%s", c.endpoint, path)
 
-	// Example structure if JobId was known:
-	/*
-	   if organizationId == "" || pipelineIdStr == "" || jobIdStr == "" {
-	       return "", fmt.Errorf("organizationId, pipelineId, and jobId are required for GetPipelineRunLogs")
-	   }
-	   pipelineIdInt, err := strconv.ParseInt(pipelineIdStr, 10, 64)
-	   if err != nil { return "", fmt.Errorf("invalid pipelineId: %w", err) }
-	   jobIdInt, err := strconv.ParseInt(jobIdStr, 10, 64)
-	   if err != nil { return "", fmt.Errorf("invalid jobId: %w", err) }
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
 
-	   request := devops_rdc.CreateGetPipelineLogRequest()
-	   request.Scheme = "https"
-	   request.OrgId = organizationId
-	   request.PipelineId = requests.NewInteger(pipelineIdInt)
-	   request.JobId = requests.NewInteger(jobIdInt)
+	req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
 
-	   response, err := c.sdkClient.GetPipelineLog(request)
-	   if err != nil {
-	       return "", fmt.Errorf("failed to get pipeline log: %w", err)
-	   }
-	   if !response.Success {
-	       return "", fmt.Errorf("API error getting pipeline log: %s (ErrorCode: %s)", response.ErrorMessage, response.ErrorCode)
-	   }
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
 
-	   // response.Object is []devops_rdc.Job. The structure of Job is not in get_pipeline_log.go.
-	   // Assuming each Job object has a field like "LogContent" (string) or "LogEntries" ([]string).
-	   var allLogs strings.Builder
-	   dataBytes, err := json.Marshal(response.Object)
-	   if err != nil {
-	       return "", fmt.Errorf("failed to marshal log response.Object: %w", err)
-	   }
-	   var jobsData []map[string]interface{}
-	   if err := json.Unmarshal(dataBytes, &jobsData); err != nil {
-	       return "", fmt.Errorf("failed to unmarshal log response.Object into jobsData: %w", err)
-	   }
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
 
-	   for _, jobMap := range jobsData {
-	       // Assuming each jobMap contains log information.
-	       // Need to find the key for log content, e.g., "Content", "Log", "Steps" then their logs.
-	       if logContent, ok := jobMap["LogContent"].(string); ok { // This key "LogContent" is a guess.
-	           allLogs.WriteString(logContent)
-	           allLogs.WriteString("\n")
-	       }
-	       // If logs are per step within a job, more complex parsing is needed.
-	   }
-	   if allLogs.Len() == 0 && len(jobsData) > 0 {
-	       return "", fmt.Errorf("logs found for job %s, but content parsing failed. Raw job data: %+v", jobIdStr, jobsData[0])
-	   }
-	   return allLogs.String(), nil
-	*/
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("GetPipelineRunDetails URL: %s", url)
+		debugLogger.Printf("Response Status: %d", resp.StatusCode)
+		debugLogger.Printf("Response Body: %.1000s", string(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var responseData map[string]interface{}
+	if err := json.Unmarshal(respBody, &responseData); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	// Parse the response according to API documentation
+	details := &PipelineRunDetails{}
+
+	if pipelineRunID, ok := responseData["pipelineRunId"].(float64); ok {
+		details.PipelineRunID = int64(pipelineRunID)
+	}
+	if pipelineID, ok := responseData["pipelineId"].(float64); ok {
+		details.PipelineID = int64(pipelineID)
+	}
+	if status, ok := responseData["status"].(string); ok {
+		details.Status = status
+	}
+	if triggerMode, ok := responseData["triggerMode"].(float64); ok {
+		details.TriggerMode = int(triggerMode)
+	}
+	if createTime, ok := responseData["createTime"].(float64); ok {
+		details.CreateTime = int64(createTime)
+	}
+	if updateTime, ok := responseData["updateTime"].(float64); ok {
+		details.UpdateTime = int64(updateTime)
+	}
+
+	// Parse stages and jobs
+	if stagesData, ok := responseData["stages"].([]interface{}); ok {
+		for _, stageItem := range stagesData {
+			if stageMap, ok := stageItem.(map[string]interface{}); ok {
+				stage := Stage{}
+				if index, ok := stageMap["index"].(string); ok {
+					stage.Index = index
+				}
+				if name, ok := stageMap["name"].(string); ok {
+					stage.Name = name
+				}
+
+				// Parse stage info and jobs
+				if stageInfo, ok := stageMap["stageInfo"].(map[string]interface{}); ok {
+					if jobsData, ok := stageInfo["jobs"].([]interface{}); ok {
+						for _, jobItem := range jobsData {
+							if jobMap, ok := jobItem.(map[string]interface{}); ok {
+								job := Job{}
+								if id, ok := jobMap["id"].(float64); ok {
+									job.ID = int64(id)
+								}
+								if jobSign, ok := jobMap["jobSign"].(string); ok {
+									job.JobSign = jobSign
+								}
+								if name, ok := jobMap["name"].(string); ok {
+									job.Name = name
+								}
+								if status, ok := jobMap["status"].(string); ok {
+									job.Status = status
+								}
+								if startTime, ok := jobMap["startTime"].(float64); ok && startTime > 0 {
+									job.StartTime = time.Unix(int64(startTime)/1000, 0)
+								}
+								if endTime, ok := jobMap["endTime"].(float64); ok && endTime > 0 {
+									job.EndTime = time.Unix(int64(endTime)/1000, 0)
+								}
+								stage.Jobs = append(stage.Jobs, job)
+							}
+						}
+					}
+				}
+				details.Stages = append(details.Stages, stage)
+			}
+		}
+	}
+
+	return details, nil
+}
+
+// GetPipelineJobRunLog retrieves logs for a specific job within a pipeline run
+// Based on: https://help.aliyun.com/zh/yunxiao/developer-reference/getpipelinejobrunlog
+func (c *Client) GetPipelineJobRunLog(organizationId, pipelineId, pipelineRunId, jobId string) (string, error) {
+	if !c.useToken {
+		return "", fmt.Errorf("GetPipelineJobRunLog only supports token-based authentication")
+	}
+
+	if organizationId == "" || pipelineId == "" || pipelineRunId == "" || jobId == "" {
+		return "", fmt.Errorf("organizationId, pipelineId, pipelineRunId, and jobId are required")
+	}
+
+	// API endpoint: GET https://{domain}/oapi/v1/flow/organizations/{organizationId}/pipelines/{pipelineId}/runs/{pipelineRunId}/job/{jobId}/log
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/runs/%s/job/%s/log", organizationId, pipelineId, pipelineRunId, jobId)
+	url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("GetPipelineJobRunLog URL: %s", url)
+		debugLogger.Printf("Response Status: %d", resp.StatusCode)
+		debugLogger.Printf("Response Body: %.1000s", string(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var responseData map[string]interface{}
+	if err := json.Unmarshal(respBody, &responseData); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	// Extract log content from response
+	if content, ok := responseData["content"].(string); ok {
+		return content, nil
+	}
+
+	return "", fmt.Errorf("no log content found in response")
+}
+
+// GetPipelineRunLogs retrieves logs for all jobs within a pipeline run.
+// This method first gets the pipeline run details to obtain the job list,
+// then fetches logs for each job and concatenates them with job headers.
+func (c *Client) GetPipelineRunLogs(organizationId string, pipelineIdStr string, runIdStr string) (string, error) {
+	if !c.useToken {
+		return "", fmt.Errorf("GetPipelineRunLogs only supports token-based authentication")
+	}
+
+	if organizationId == "" || pipelineIdStr == "" || runIdStr == "" {
+		return "", fmt.Errorf("organizationId, pipelineId, and runId are required for GetPipelineRunLogs")
+	}
+
+	// Step 1: Get pipeline run details to obtain job list
+	runDetails, err := c.GetPipelineRunDetails(organizationId, pipelineIdStr, runIdStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get pipeline run details: %w", err)
+	}
+
+	var allLogs strings.Builder
+	allLogs.WriteString(fmt.Sprintf("Pipeline Run Logs - Run ID: %s\n", runIdStr))
+	allLogs.WriteString(fmt.Sprintf("Pipeline ID: %s\n", pipelineIdStr))
+	allLogs.WriteString(fmt.Sprintf("Status: %s\n", runDetails.Status))
+	allLogs.WriteString("=" + strings.Repeat("=", 80) + "\n\n")
+
+	// Step 2: Iterate through all stages and jobs to fetch logs
+	jobCount := 0
+	for _, stage := range runDetails.Stages {
+		if len(stage.Jobs) > 0 {
+			allLogs.WriteString(fmt.Sprintf("[yellow]Stage: %s (%s)[-]\n", stage.Name, stage.Index))
+			allLogs.WriteString("-" + strings.Repeat("-", 60) + "\n\n")
+		}
+
+		for _, job := range stage.Jobs {
+			jobCount++
+
+			// Add job header with yellow color formatting for tview
+			allLogs.WriteString(fmt.Sprintf("[yellow]Job #%d: %s (ID: %d)[-]\n", jobCount, job.Name, job.ID))
+			allLogs.WriteString(fmt.Sprintf("[yellow]Job Sign: %s[-]\n", job.JobSign))
+			allLogs.WriteString(fmt.Sprintf("[yellow]Status: %s[-]\n", job.Status))
+			if !job.StartTime.IsZero() {
+				allLogs.WriteString(fmt.Sprintf("[yellow]Start Time: %s[-]\n", job.StartTime.Format("2006-01-02 15:04:05")))
+			}
+			if !job.EndTime.IsZero() {
+				allLogs.WriteString(fmt.Sprintf("[yellow]End Time: %s[-]\n", job.EndTime.Format("2006-01-02 15:04:05")))
+			}
+			allLogs.WriteString("[yellow]" + strings.Repeat("=", 50) + "[-]\n")
+
+			// Step 3: Fetch logs for this specific job
+			jobIdStr := fmt.Sprintf("%d", job.ID)
+			jobLogs, err := c.GetPipelineJobRunLog(organizationId, pipelineIdStr, runIdStr, jobIdStr)
+			if err != nil {
+				allLogs.WriteString(fmt.Sprintf("Error fetching logs for job %s: %v\n", jobIdStr, err))
+			} else if jobLogs == "" {
+				allLogs.WriteString("No logs available for this job.\n")
+			} else {
+				allLogs.WriteString(jobLogs)
+				if !strings.HasSuffix(jobLogs, "\n") {
+					allLogs.WriteString("\n")
+				}
+			}
+
+			allLogs.WriteString("\n" + strings.Repeat("=", 80) + "\n\n")
+		}
+	}
+
+	if jobCount == 0 {
+		allLogs.WriteString("No jobs found in this pipeline run.\n")
+	} else {
+		allLogs.WriteString(fmt.Sprintf("Total jobs processed: %d\n", jobCount))
+	}
+
+	return allLogs.String(), nil
 }
 
 // getNumberField is a helper for dynamic map parsing

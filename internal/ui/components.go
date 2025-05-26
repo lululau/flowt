@@ -436,6 +436,9 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 
 // NewMainView creates the main layout for the application.
 func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tview.Primitive {
+	// Force default background color for primitives to handle potential InputField empty background issue
+	tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
+
 	// Initialize global references for modal helpers
 	appGlobal = app
 
@@ -463,10 +466,15 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		SetLabel("Search: ").
 		SetPlaceholder("Pipeline name/ID (/ to focus)...").
 		SetFieldWidth(0)
-	searchInput.SetBackgroundColor(tcell.ColorDefault)
-	searchInput.SetFieldBackgroundColor(tcell.ColorDefault)
-	searchInput.SetLabelColor(tcell.ColorWhite)
-	searchInput.SetFieldTextColor(tcell.ColorWhite)
+	searchInput.SetBackgroundColor(tcell.ColorDefault)      // Overall background of the box
+	searchInput.SetFieldBackgroundColor(tcell.ColorDefault) // Background of the text entry area
+	searchInput.SetLabelColor(tcell.ColorWhite)             // Color of the "Search: " label
+	searchInput.SetFieldTextColor(tcell.ColorWhite)         // Color of the text as you type
+	searchInput.SetPlaceholderTextColor(tcell.ColorGray)    // Color of the placeholder text
+
+	// Explicitly set the style for the field itself
+	fieldStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorWhite)
+	searchInput.SetFieldStyle(fieldStyle)
 
 	// Help info
 	helpInfo := tview.NewTextView().
@@ -587,8 +595,13 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			}
 			return nil
 		case 'q':
-			// Handle 'q' at table level to prevent global handler from catching it
-			// In pipelines view, 'q' should not exit the program
+			// If search is active, clear search and focus table. Otherwise, do nothing.
+			if currentSearchQuery != "" {
+				currentSearchQuery = ""
+				searchInput.SetText("")
+				updatePipelineTable(pipelineTable, app, searchInput)
+				// app.SetFocus(pipelineTable) // Already focused or will be by searchInput.SetDoneFunc
+			}
 			return nil
 		case 'r': // Run pipeline
 			if rowCount > 1 && currentRow > 0 {
@@ -686,7 +699,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Add input capture for search input to handle 'q' key
 	searchInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		// Allow 'q' to be typed in search input, don't let global handler catch it
+		// Allow 'q' to be typed in search input.
+		// For other keys, let them be processed by SetDoneFunc or propagate.
 		return event
 	})
 
@@ -879,34 +893,6 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				app.SetFocus(searchInput)
 				return nil
 			}
-		case 'Q':
-			// Quit application
-			app.Stop()
-			return nil
-		case 'q':
-			// Back/escape behavior
-			if currentPage == "groups" {
-				currentViewMode = "all_pipelines"
-				selectedGroupID = ""
-				selectedGroupName = ""
-				updatePipelineTable(pipelineTable, app, searchInput)
-				mainPages.SwitchToPage("pipelines")
-				app.SetFocus(pipelineTable)
-			} else if currentPage == "run_history" {
-				isRunHistoryActive = false
-				mainPages.SwitchToPage("pipelines")
-				app.SetFocus(pipelineTable)
-			} else if currentPage == "logs" {
-				isLogViewActive = false
-				if isRunHistoryActive {
-					mainPages.SwitchToPage("run_history")
-					app.SetFocus(runHistoryTable)
-				} else {
-					mainPages.SwitchToPage("pipelines")
-					app.SetFocus(pipelineTable)
-				}
-			}
-			return nil
 		}
 
 		// Handle special keys
@@ -933,6 +919,32 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	})
 
 	app.SetFocus(pipelineTable)
+
+	// Set global app input capture for 'q' and 'Q' as the outermost layer
+	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		focused := app.GetFocus()
+
+		switch event.Rune() {
+		case 'Q': // Uppercase Q quits
+			app.Stop()
+			return nil // Consumed
+		case 'q': // Lowercase q
+			// If searchInput is focused, it needs to process 'q' for typing.
+			// searchInput's own InputCapture should return event to allow typing.
+			if focused == searchInput {
+				return event
+			}
+			// In all other cases where 'q' bubbles up to the app level,
+			// we consume it and do nothing. This prevents any default quit.
+			// Specific navigation for 'q' should have been handled by component-level
+			// input captures (which should return nil).
+			return nil // Consumed, do nothing (prevents quit)
+		}
+
+		// For other events not handled here (e.g., Ctrl+G, /),
+		// they will propagate to other handlers like mainPages.SetInputCapture.
+		return event
+	})
 
 	return mainPages
 }
