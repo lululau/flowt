@@ -48,14 +48,28 @@ type PipelineGroup struct {
 	Name    string `json:"name"`
 }
 
+// JobAction represents an action available for a job
+type JobAction struct {
+	Type        string                 `json:"type"`
+	DisplayType string                 `json:"displayType"`
+	Data        string                 `json:"data"`
+	Disable     bool                   `json:"disable"`
+	Params      map[string]interface{} `json:"params"`
+	Name        string                 `json:"name"`
+	Title       string                 `json:"title"`
+	Order       interface{}            `json:"order"`
+}
+
 // Job represents a job within a pipeline run stage
 type Job struct {
-	ID        int64     `json:"id"`
-	JobSign   string    `json:"jobSign"`
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	StartTime time.Time `json:"startTime"`
-	EndTime   time.Time `json:"endTime"`
+	ID        int64       `json:"id"`
+	JobSign   string      `json:"jobSign"`
+	Name      string      `json:"name"`
+	Status    string      `json:"status"`
+	StartTime time.Time   `json:"startTime"`
+	EndTime   time.Time   `json:"endTime"`
+	Actions   []JobAction `json:"actions"`
+	Result    string      `json:"result"`
 }
 
 // Stage represents a stage in a pipeline run
@@ -74,6 +88,45 @@ type PipelineRunDetails struct {
 	CreateTime    int64   `json:"createTime"`
 	UpdateTime    int64   `json:"updateTime"`
 	Stages        []Stage `json:"stages"`
+}
+
+// VMDeployMachine represents a machine in a VM deployment order
+type VMDeployMachine struct {
+	IP           string `json:"ip"`
+	MachineSn    string `json:"machineSn"`
+	Status       string `json:"status"`
+	ClientStatus string `json:"clientStatus"`
+	BatchNum     int    `json:"batchNum"`
+	CreateTime   int64  `json:"createTime"`
+	UpdateTime   int64  `json:"updateTime"`
+}
+
+// VMDeployMachineInfo represents machine deployment information
+type VMDeployMachineInfo struct {
+	BatchNum       int               `json:"batchNum"`
+	HostGroupId    int               `json:"hostGroupId"`
+	DeployMachines []VMDeployMachine `json:"deployMachines"`
+}
+
+// VMDeployOrder represents a VM deployment order
+type VMDeployOrder struct {
+	DeployOrderId     int                 `json:"deployOrderId"`
+	Status            string              `json:"status"`
+	Creator           string              `json:"creator"`
+	CreateTime        int64               `json:"createTime"`
+	UpdateTime        int64               `json:"updateTime"`
+	CurrentBatch      int                 `json:"currentBatch"`
+	TotalBatch        int                 `json:"totalBatch"`
+	DeployMachineInfo VMDeployMachineInfo `json:"deployMachineInfo"`
+}
+
+// VMDeployMachineLog represents deployment log for a specific machine
+type VMDeployMachineLog struct {
+	AliyunRegion    string `json:"aliyunRegion"`
+	DeployBeginTime string `json:"deployBeginTime"`
+	DeployEndTime   string `json:"deployEndTime"`
+	DeployLog       string `json:"deployLog"`
+	DeployLogPath   string `json:"deployLogPath"`
 }
 
 // Client is a client for interacting with the Aliyun DevOps API.
@@ -620,6 +673,41 @@ func (c *Client) GetPipelineRunDetails(organizationId, pipelineId, pipelineRunId
 								if endTime, ok := jobMap["endTime"].(float64); ok && endTime > 0 {
 									job.EndTime = time.Unix(int64(endTime)/1000, 0)
 								}
+								if result, ok := jobMap["result"].(string); ok {
+									job.Result = result
+								}
+
+								// Parse actions array
+								if actionsData, ok := jobMap["actions"].([]interface{}); ok {
+									for _, actionItem := range actionsData {
+										if actionMap, ok := actionItem.(map[string]interface{}); ok {
+											action := JobAction{}
+											if actionType, ok := actionMap["type"].(string); ok {
+												action.Type = actionType
+											}
+											if displayType, ok := actionMap["displayType"].(string); ok {
+												action.DisplayType = displayType
+											}
+											if data, ok := actionMap["data"].(string); ok {
+												action.Data = data
+											}
+											if disable, ok := actionMap["disable"].(bool); ok {
+												action.Disable = disable
+											}
+											if params, ok := actionMap["params"].(map[string]interface{}); ok {
+												action.Params = params
+											}
+											if name, ok := actionMap["name"].(string); ok {
+												action.Name = name
+											}
+											if title, ok := actionMap["title"].(string); ok {
+												action.Title = title
+											}
+											action.Order = actionMap["order"]
+											job.Actions = append(job.Actions, action)
+										}
+									}
+								}
 								stage.Jobs = append(stage.Jobs, job)
 							}
 						}
@@ -740,16 +828,87 @@ func (c *Client) GetPipelineRunLogs(organizationId string, pipelineIdStr string,
 			allLogs.WriteString("[yellow]" + strings.Repeat("=", 50) + "[-]\n")
 
 			// Step 3: Fetch logs for this specific job
-			jobIdStr := fmt.Sprintf("%d", job.ID)
-			jobLogs, err := c.GetPipelineJobRunLog(organizationId, pipelineIdStr, runIdStr, jobIdStr)
-			if err != nil {
-				allLogs.WriteString(fmt.Sprintf("Error fetching logs for job %s: %v\n", jobIdStr, err))
-			} else if jobLogs == "" {
-				allLogs.WriteString("No logs available for this job.\n")
+			// Check if this job has GetVMDeployOrder action
+			hasVMDeployAction := false
+			for _, action := range job.Actions {
+				if action.Type == "GetVMDeployOrder" {
+					hasVMDeployAction = true
+					break
+				}
+			}
+
+			if hasVMDeployAction {
+				// This is a VM deployment job, use VM deployment APIs
+				deployOrderId, err := extractDeployOrderId(job.Result)
+				if err != nil {
+					allLogs.WriteString(fmt.Sprintf("Error extracting deployOrderId from job result: %v\n", err))
+				} else {
+					// Get VM deployment order details
+					deployOrder, err := c.GetVMDeployOrder(organizationId, pipelineIdStr, deployOrderId)
+					if err != nil {
+						allLogs.WriteString(fmt.Sprintf("Error fetching VM deploy order %s: %v\n", deployOrderId, err))
+					} else {
+						allLogs.WriteString(fmt.Sprintf("[yellow]Deploy Order ID: %d[-]\n", deployOrder.DeployOrderId))
+						allLogs.WriteString(fmt.Sprintf("[yellow]Deploy Status: %s[-]\n", deployOrder.Status))
+						allLogs.WriteString(fmt.Sprintf("[yellow]Current Batch: %d/%d[-]\n", deployOrder.CurrentBatch, deployOrder.TotalBatch))
+						allLogs.WriteString(fmt.Sprintf("[yellow]Host Group ID: %d[-]\n", deployOrder.DeployMachineInfo.HostGroupId))
+						allLogs.WriteString("[yellow]" + strings.Repeat("-", 40) + "[-]\n")
+
+						// Get logs for each machine in the deployment
+						if len(deployOrder.DeployMachineInfo.DeployMachines) == 0 {
+							allLogs.WriteString("No machines found in this deployment.\n")
+						} else {
+							for i, machine := range deployOrder.DeployMachineInfo.DeployMachines {
+								allLogs.WriteString(fmt.Sprintf("[yellow]Machine #%d: %s (SN: %s)[-]\n", i+1, machine.IP, machine.MachineSn))
+								allLogs.WriteString(fmt.Sprintf("[yellow]Machine Status: %s, Client Status: %s[-]\n", machine.Status, machine.ClientStatus))
+								allLogs.WriteString(fmt.Sprintf("[yellow]Batch: %d[-]\n", machine.BatchNum))
+								allLogs.WriteString("[yellow]" + strings.Repeat(".", 30) + "[-]\n")
+
+								// Get machine deployment log
+								machineLog, err := c.GetVMDeployMachineLog(organizationId, pipelineIdStr, deployOrderId, machine.MachineSn)
+								if err != nil {
+									allLogs.WriteString(fmt.Sprintf("Error fetching machine log for %s: %v\n", machine.MachineSn, err))
+								} else {
+									if machineLog.DeployBeginTime != "" {
+										allLogs.WriteString(fmt.Sprintf("Deploy Begin Time: %s\n", machineLog.DeployBeginTime))
+									}
+									if machineLog.DeployEndTime != "" {
+										allLogs.WriteString(fmt.Sprintf("Deploy End Time: %s\n", machineLog.DeployEndTime))
+									}
+									if machineLog.AliyunRegion != "" {
+										allLogs.WriteString(fmt.Sprintf("Region: %s\n", machineLog.AliyunRegion))
+									}
+									if machineLog.DeployLogPath != "" {
+										allLogs.WriteString(fmt.Sprintf("Log Path: %s\n", machineLog.DeployLogPath))
+									}
+									allLogs.WriteString("Deploy Log:\n")
+									if machineLog.DeployLog == "" {
+										allLogs.WriteString("No deployment logs available for this machine.\n")
+									} else {
+										allLogs.WriteString(machineLog.DeployLog)
+										if !strings.HasSuffix(machineLog.DeployLog, "\n") {
+											allLogs.WriteString("\n")
+										}
+									}
+								}
+								allLogs.WriteString("\n")
+							}
+						}
+					}
+				}
 			} else {
-				allLogs.WriteString(jobLogs)
-				if !strings.HasSuffix(jobLogs, "\n") {
-					allLogs.WriteString("\n")
+				// This is a regular job, use standard job log API
+				jobIdStr := fmt.Sprintf("%d", job.ID)
+				jobLogs, err := c.GetPipelineJobRunLog(organizationId, pipelineIdStr, runIdStr, jobIdStr)
+				if err != nil {
+					allLogs.WriteString(fmt.Sprintf("Error fetching logs for job %s: %v\n", jobIdStr, err))
+				} else if jobLogs == "" {
+					allLogs.WriteString("No logs available for this job.\n")
+				} else {
+					allLogs.WriteString(jobLogs)
+					if !strings.HasSuffix(jobLogs, "\n") {
+						allLogs.WriteString("\n")
+					}
 				}
 			}
 
@@ -773,6 +932,32 @@ func getNumberField(data map[string]interface{}, key string) float64 {
 	}
 	// Could add more type checks if needed (e.g., string to float64)
 	return 0
+}
+
+// extractDeployOrderId extracts deployOrderId from job result JSON string
+func extractDeployOrderId(resultJSON string) (string, error) {
+	if resultJSON == "" {
+		return "", fmt.Errorf("result JSON is empty")
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		return "", fmt.Errorf("failed to unmarshal result JSON: %w", err)
+	}
+
+	// Navigate through the nested structure: result.data.deployOrderId.id
+	if data, ok := result["data"].(map[string]interface{}); ok {
+		if deployOrderIdData, ok := data["deployOrderId"].(map[string]interface{}); ok {
+			if id, ok := deployOrderIdData["id"].(float64); ok {
+				return fmt.Sprintf("%.0f", id), nil
+			}
+			if id, ok := deployOrderIdData["id"].(string); ok {
+				return id, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("deployOrderId not found in result JSON")
 }
 
 // ListPipelineRuns retrieves a list of runs for a specific pipeline.
@@ -1577,4 +1762,197 @@ func (c *Client) ListPipelineJobHistorys(organizationId, pipelineId, category, i
 	}
 
 	return pipelineRuns, nil
+}
+
+// GetVMDeployOrder retrieves VM deployment order details
+// Based on: https://help.aliyun.com/zh/yunxiao/developer-reference/getvmdeployorder
+func (c *Client) GetVMDeployOrder(organizationId, pipelineId, deployOrderId string) (*VMDeployOrder, error) {
+	if !c.useToken {
+		return nil, fmt.Errorf("GetVMDeployOrder only supports token-based authentication")
+	}
+
+	if organizationId == "" || pipelineId == "" || deployOrderId == "" {
+		return nil, fmt.Errorf("organizationId, pipelineId, and deployOrderId are required")
+	}
+
+	// API endpoint: GET https://{domain}/oapi/v1/flow/organizations/{organizationId}/pipelines/{pipelineId}/deploy/{deployOrderId}
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/deploy/%s", organizationId, pipelineId, deployOrderId)
+	url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("GetVMDeployOrder URL: %s", url)
+		debugLogger.Printf("Response Status: %d", resp.StatusCode)
+		debugLogger.Printf("Response Body: %.1000s", string(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var responseData map[string]interface{}
+	if err := json.Unmarshal(respBody, &responseData); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	// Parse the response according to API documentation
+	deployOrder := &VMDeployOrder{}
+
+	if deployOrderId, ok := responseData["deployOrderId"].(float64); ok {
+		deployOrder.DeployOrderId = int(deployOrderId)
+	}
+	if status, ok := responseData["status"].(string); ok {
+		deployOrder.Status = status
+	}
+	if creator, ok := responseData["creator"].(string); ok {
+		deployOrder.Creator = creator
+	}
+	if createTime, ok := responseData["createTime"].(float64); ok {
+		deployOrder.CreateTime = int64(createTime)
+	}
+	if updateTime, ok := responseData["updateTime"].(float64); ok {
+		deployOrder.UpdateTime = int64(updateTime)
+	}
+	if currentBatch, ok := responseData["currentBatch"].(float64); ok {
+		deployOrder.CurrentBatch = int(currentBatch)
+	}
+	if totalBatch, ok := responseData["totalBatch"].(float64); ok {
+		deployOrder.TotalBatch = int(totalBatch)
+	}
+
+	// Parse deployMachineInfo
+	if deployMachineInfoData, ok := responseData["deployMachineInfo"].(map[string]interface{}); ok {
+		if batchNum, ok := deployMachineInfoData["batchNum"].(float64); ok {
+			deployOrder.DeployMachineInfo.BatchNum = int(batchNum)
+		}
+		if hostGroupId, ok := deployMachineInfoData["hostGroupId"].(float64); ok {
+			deployOrder.DeployMachineInfo.HostGroupId = int(hostGroupId)
+		}
+
+		// Parse deployMachines array
+		if deployMachinesData, ok := deployMachineInfoData["deployMachines"].([]interface{}); ok {
+			for _, machineItem := range deployMachinesData {
+				if machineMap, ok := machineItem.(map[string]interface{}); ok {
+					machine := VMDeployMachine{}
+					if ip, ok := machineMap["ip"].(string); ok {
+						machine.IP = ip
+					}
+					if machineSn, ok := machineMap["machineSn"].(string); ok {
+						machine.MachineSn = machineSn
+					}
+					if status, ok := machineMap["status"].(string); ok {
+						machine.Status = status
+					}
+					if clientStatus, ok := machineMap["clientStatus"].(string); ok {
+						machine.ClientStatus = clientStatus
+					}
+					if batchNum, ok := machineMap["batchNum"].(float64); ok {
+						machine.BatchNum = int(batchNum)
+					}
+					if createTime, ok := machineMap["createTime"].(float64); ok {
+						machine.CreateTime = int64(createTime)
+					}
+					if updateTime, ok := machineMap["updateTime"].(float64); ok {
+						machine.UpdateTime = int64(updateTime)
+					}
+					deployOrder.DeployMachineInfo.DeployMachines = append(deployOrder.DeployMachineInfo.DeployMachines, machine)
+				}
+			}
+		}
+	}
+
+	return deployOrder, nil
+}
+
+// GetVMDeployMachineLog retrieves deployment log for a specific machine
+// Based on: https://help.aliyun.com/zh/yunxiao/developer-reference/getvmdeploymachinelog
+func (c *Client) GetVMDeployMachineLog(organizationId, pipelineId, deployOrderId, machineSn string) (*VMDeployMachineLog, error) {
+	if !c.useToken {
+		return nil, fmt.Errorf("GetVMDeployMachineLog only supports token-based authentication")
+	}
+
+	if organizationId == "" || pipelineId == "" || deployOrderId == "" || machineSn == "" {
+		return nil, fmt.Errorf("organizationId, pipelineId, deployOrderId, and machineSn are required")
+	}
+
+	// API endpoint: GET https://{domain}/oapi/v1/flow/organizations/{organizationId}/pipelines/{pipelineId}/deploy/{deployOrderId}/machine/{machineSn}/log
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/deploy/%s/machine/%s/log", organizationId, pipelineId, deployOrderId, machineSn)
+	url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("GetVMDeployMachineLog URL: %s", url)
+		debugLogger.Printf("Response Status: %d", resp.StatusCode)
+		debugLogger.Printf("Response Body: %.1000s", string(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var responseData map[string]interface{}
+	if err := json.Unmarshal(respBody, &responseData); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	// Parse the response according to API documentation
+	machineLog := &VMDeployMachineLog{}
+
+	if aliyunRegion, ok := responseData["aliyunRegion"].(string); ok {
+		machineLog.AliyunRegion = aliyunRegion
+	}
+	if deployBeginTime, ok := responseData["deployBeginTime"].(string); ok {
+		machineLog.DeployBeginTime = deployBeginTime
+	}
+	if deployEndTime, ok := responseData["deployEndTime"].(string); ok {
+		machineLog.DeployEndTime = deployEndTime
+	}
+	if deployLog, ok := responseData["deployLog"].(string); ok {
+		machineLog.DeployLog = deployLog
+	}
+	if deployLogPath, ok := responseData["deployLogPath"].(string); ok {
+		machineLog.DeployLogPath = deployLogPath
+	}
+
+	return machineLog, nil
 }

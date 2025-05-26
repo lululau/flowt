@@ -2,7 +2,7 @@
 
 ## 实现概述
 
-根据用户需求，成功实现了显示历史运行日志的功能。该功能按照阿里云官方API文档实现，能够获取流水线运行中所有Job的日志并进行格式化显示。
+根据用户需求，成功实现了显示历史运行日志的功能。该功能按照阿里云官方API文档实现，能够获取流水线运行中所有Job的日志并进行格式化显示。新版本支持智能检测Job类型，对于包含VM部署的Job使用专门的部署日志API。
 
 ## 实现的功能
 
@@ -11,29 +11,88 @@
 #### GetPipelineRunDetails
 - **文件**: `internal/api/client.go`
 - **基于**: [GetPipelineRun API](https://help.aliyun.com/zh/yunxiao/developer-reference/getpipelinerun)
-- **功能**: 获取流水线运行详情，包含所有Stage和Job信息
+- **功能**: 获取流水线运行详情，包含所有Stage和Job信息，以及Job的Actions
 - **返回**: `*PipelineRunDetails` 结构体
 
 #### GetPipelineJobRunLog  
 - **文件**: `internal/api/client.go`
 - **基于**: [GetPipelineJobRunLog API](https://help.aliyun.com/zh/yunxiao/developer-reference/getpipelinejobrunlog)
-- **功能**: 获取指定Job的运行日志
+- **功能**: 获取指定Job的运行日志（适用于常规Job）
 - **返回**: 日志内容字符串
+
+#### GetVMDeployOrder (新增)
+- **文件**: `internal/api/client.go`
+- **基于**: [GetVMDeployOrder API](https://help.aliyun.com/zh/yunxiao/developer-reference/getvmdeployorder)
+- **功能**: 获取VM部署单详情，包含机器列表和部署状态
+- **返回**: `*VMDeployOrder` 结构体
+
+#### GetVMDeployMachineLog (新增)
+- **文件**: `internal/api/client.go`
+- **基于**: [GetVMDeployMachineLog API](https://help.aliyun.com/zh/yunxiao/developer-reference/getvmdeploymachinelog)
+- **功能**: 获取指定机器的部署日志
+- **返回**: `*VMDeployMachineLog` 结构体
 
 #### GetPipelineRunLogs (重构)
 - **文件**: `internal/api/client.go`
-- **功能**: 整合所有Job日志的主要方法
+- **功能**: 整合所有Job日志的主要方法，支持智能Job类型检测
 - **工作流程**:
-  1. 调用 `GetPipelineRunDetails` 获取Job列表
+  1. 调用 `GetPipelineRunDetails` 获取Job列表和Actions
   2. 遍历所有Stage和Job
-  3. 对每个Job调用 `GetPipelineJobRunLog`
+  3. 检测Job的Action类型：
+     - 包含`GetVMDeployOrder` action：使用VM部署API
+     - 其他：使用常规Job日志API
   4. 格式化并拼接所有日志
 
 ### 2. 新增数据结构
 
+#### JobAction 结构体 (新增)
 ```go
-// Job represents a job within a pipeline run stage
+type JobAction struct {
+    Type        string                 `json:"type"`
+    DisplayType string                 `json:"displayType"`
+    Data        string                 `json:"data"`
+    Disable     bool                   `json:"disable"`
+    Params      map[string]interface{} `json:"params"`
+    Name        string                 `json:"name"`
+    Title       string                 `json:"title"`
+    Order       interface{}            `json:"order"`
+}
+```
+
+#### Job 结构体 (扩展)
+```go
 type Job struct {
+    ID        int64       `json:"id"`
+    JobSign   string      `json:"jobSign"`
+    Name      string      `json:"name"`
+    Status    string      `json:"status"`
+    StartTime time.Time   `json:"startTime"`
+    EndTime   time.Time   `json:"endTime"`
+    Actions   []JobAction `json:"actions"`  // 新增
+    Result    string      `json:"result"`   // 新增
+}
+```
+
+#### VM部署相关结构体 (新增)
+```go
+type VMDeployMachine struct {
+    IP           string `json:"ip"`
+    MachineSn    string `json:"machineSn"`
+    Status       string `json:"status"`
+    ClientStatus string `json:"clientStatus"`
+    BatchNum     int    `json:"batchNum"`
+    CreateTime   int64  `json:"createTime"`
+    UpdateTime   int64  `json:"updateTime"`
+}
+
+type VMDeployMachineInfo struct {
+    BatchNum       int               `json:"batchNum"`
+    HostGroupId    int               `json:"hostGroupId"`
+    DeployMachines []VMDeployMachine `json:"deployMachines"`
+}
+
+type VMDeployOrder struct {
+    DeployOrderId     int                 `json:"deployOrderId"`
     ID        int64     `json:"id"`
     JobSign   string    `json:"jobSign"`
     Name      string    `json:"name"`
