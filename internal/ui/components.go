@@ -109,7 +109,7 @@ func getStatusColor(status string) tcell.Color {
 }
 
 // updatePipelineTable filters and updates the pipeline table widget.
-func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.InputField) {
+func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.InputField, apiClient *api.Client, orgId string) {
 	table.Clear()
 	pipelineTableGlobal = table // Update global reference
 
@@ -132,17 +132,35 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 		table.SetCell(0, col, cell)
 	}
 
-	// 1. Filter by selected group (simulation)
-	tempFilteredByGroup := make([]api.Pipeline, 0)
+	// 1. Get pipelines based on current view mode
+	var tempFilteredByGroup []api.Pipeline
 	if currentViewMode == "pipelines_in_group" && selectedGroupID != "" {
-		for _, p := range allPipelines {
-			// SIMULATION: Using selectedGroupName against pipeline.Name
-			// A real implementation would check p.GroupID == selectedGroupID
-			if strings.Contains(strings.ToLower(p.Name), strings.ToLower(selectedGroupName)) {
-				tempFilteredByGroup = append(tempFilteredByGroup, p)
-			}
+		// Use the correct API to get pipelines in the selected group
+		groupIdInt := 0
+		if _, err := fmt.Sscanf(selectedGroupID, "%d", &groupIdInt); err != nil {
+			// Show error if group ID is invalid
+			cell := tview.NewTableCell(fmt.Sprintf("Error: Invalid group ID '%s'", selectedGroupID)).
+				SetTextColor(tcell.ColorRed).
+				SetAlign(tview.AlignCenter)
+			table.SetCell(1, 0, cell)
+			table.SetCell(1, 1, tview.NewTableCell(""))
+			return
 		}
+
+		// Call the ListPipelineGroupPipelines API
+		groupPipelines, err := apiClient.ListPipelineGroupPipelines(orgId, groupIdInt, nil)
+		if err != nil {
+			// Show error message
+			cell := tview.NewTableCell(fmt.Sprintf("Error fetching group pipelines: %v", err)).
+				SetTextColor(tcell.ColorRed).
+				SetAlign(tview.AlignCenter)
+			table.SetCell(1, 0, cell)
+			table.SetCell(1, 1, tview.NewTableCell(""))
+			return
+		}
+		tempFilteredByGroup = groupPipelines
 	} else {
+		// Use all pipelines for "all_pipelines" view
 		tempFilteredByGroup = append(tempFilteredByGroup, allPipelines...)
 	}
 
@@ -552,7 +570,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			fmt.Printf("UI Error: %s\n", fetchErrPipelines)
 		}
 	} else {
-		updatePipelineTable(pipelineTable, app, searchInput)
+		updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 	}
 
 	// Initial population of the group table
@@ -599,7 +617,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			if currentSearchQuery != "" {
 				currentSearchQuery = ""
 				searchInput.SetText("")
-				updatePipelineTable(pipelineTable, app, searchInput)
+				updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 				// app.SetFocus(pipelineTable) // Already focused or will be by searchInput.SetDoneFunc
 			}
 			return nil
@@ -684,7 +702,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	// --- Event Handlers for searchInput ---
 	searchInput.SetChangedFunc(func(text string) {
 		currentSearchQuery = text
-		updatePipelineTable(pipelineTable, app, searchInput)
+		updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 	})
 	searchInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter || key == tcell.KeyDown || key == tcell.KeyUp {
@@ -692,7 +710,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		} else if key == tcell.KeyEscape {
 			currentSearchQuery = ""
 			searchInput.SetText("")
-			updatePipelineTable(pipelineTable, app, searchInput)
+			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			app.SetFocus(pipelineTable)
 		}
 	})
@@ -732,7 +750,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			currentViewMode = "all_pipelines"
 			selectedGroupID = ""
 			selectedGroupName = ""
-			updatePipelineTable(pipelineTable, app, searchInput)
+			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
 			return nil
@@ -745,7 +763,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					currentViewMode = "pipelines_in_group"
 					currentSearchQuery = ""
 					searchInput.SetText("")
-					updatePipelineTable(pipelineTable, app, searchInput)
+					updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 					mainPages.SwitchToPage("pipelines")
 					app.SetFocus(pipelineTable)
 				}
@@ -756,7 +774,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			currentViewMode = "all_pipelines"
 			selectedGroupID = ""
 			selectedGroupName = ""
-			updatePipelineTable(pipelineTable, app, searchInput)
+			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
 			return nil
@@ -909,7 +927,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				currentViewMode = "all_pipelines"
 				selectedGroupID = ""
 				selectedGroupName = ""
-				updatePipelineTable(pipelineTable, app, searchInput)
+				updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 				mainPages.SwitchToPage("pipelines")
 				app.SetFocus(pipelineTable)
 			}
