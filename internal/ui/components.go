@@ -613,6 +613,12 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			}
 			return nil
 		case 'q':
+			if currentViewMode == "pipelines_in_group" {
+				currentViewMode = "group_list"
+				mainPages.SwitchToPage("groups")
+				app.SetFocus(groupTable)
+				return nil
+			}
 			// If search is active, clear search and focus table. Otherwise, do nothing.
 			if currentSearchQuery != "" {
 				currentSearchQuery = ""
