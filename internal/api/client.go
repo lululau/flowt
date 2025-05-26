@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv" // Added for string to int conversion
 	"strings" // Added for joining params
@@ -157,17 +158,86 @@ func init() {
 	}
 }
 
+// createHTTPClientWithProxy creates an HTTP client with proxy support
+// It reads http_proxy and https_proxy environment variables
+func createHTTPClientWithProxy() *http.Client {
+	transport := &http.Transport{}
+
+	// Check for HTTP proxy
+	if httpProxy := os.Getenv("http_proxy"); httpProxy != "" {
+		if proxyURL, err := url.Parse(httpProxy); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Using HTTP proxy: %s", httpProxy)
+			}
+		} else {
+			fmt.Printf("Warning: invalid http_proxy URL: %s, error: %v\n", httpProxy, err)
+		}
+	}
+
+	// Check for HTTPS proxy (takes precedence for HTTPS requests)
+	if httpsProxy := os.Getenv("https_proxy"); httpsProxy != "" {
+		if proxyURL, err := url.Parse(httpsProxy); err == nil {
+			// For HTTPS proxy, we need to set up a custom proxy function
+			// that uses different proxies for HTTP and HTTPS
+			originalProxy := transport.Proxy
+			transport.Proxy = func(req *http.Request) (*url.URL, error) {
+				if req.URL.Scheme == "https" {
+					return proxyURL, nil
+				}
+				if originalProxy != nil {
+					return originalProxy(req)
+				}
+				return nil, nil
+			}
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Using HTTPS proxy: %s", httpsProxy)
+			}
+		} else {
+			fmt.Printf("Warning: invalid https_proxy URL: %s, error: %v\n", httpsProxy, err)
+		}
+	}
+
+	// If no proxy environment variables are set, use the default proxy from environment
+	if transport.Proxy == nil {
+		transport.Proxy = http.ProxyFromEnvironment
+	}
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+}
+
 // NewClient creates a new Aliyun DevOps API client using AccessKey authentication.
 // If regionId is empty, "cn-hangzhou" will be used.
+// The client automatically supports http_proxy and https_proxy environment variables.
 func NewClient(accessKeyId, accessKeySecret, regionId string) (*Client, error) {
 	if regionId == "" {
 		regionId = "cn-hangzhou" // Default region
 	}
 
 	credential := credentials.NewAccessKeyCredential(accessKeyId, accessKeySecret)
-	sdkClient, err := devops_rdc.NewClientWithOptions(regionId, sdk.NewConfig(), credential) // Changed to devops_rdc
+
+	// Create SDK client
+	sdkClient, err := devops_rdc.NewClientWithOptions(regionId, sdk.NewConfig(), credential)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create devops-rdc client: %w", err)
+	}
+
+	// Configure proxy settings from environment variables
+	if httpProxy := os.Getenv("http_proxy"); httpProxy != "" {
+		sdkClient.SetHttpProxy(httpProxy)
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			debugLogger.Printf("SDK using HTTP proxy: %s", httpProxy)
+		}
+	}
+
+	if httpsProxy := os.Getenv("https_proxy"); httpsProxy != "" {
+		sdkClient.SetHttpsProxy(httpsProxy)
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			debugLogger.Printf("SDK using HTTPS proxy: %s", httpsProxy)
+		}
 	}
 
 	return &Client{
@@ -178,6 +248,7 @@ func NewClient(accessKeyId, accessKeySecret, regionId string) (*Client, error) {
 
 // NewClientWithToken creates a new Aliyun DevOps API client using Personal Access Token authentication.
 // This is the recommended authentication method according to Aliyun DevOps documentation.
+// The client automatically supports http_proxy and https_proxy environment variables.
 func NewClientWithToken(endpoint, personalAccessToken string) (*Client, error) {
 	if endpoint == "" {
 		endpoint = "openapi-rdc.aliyuncs.com" // Default endpoint from documentation
@@ -189,9 +260,8 @@ func NewClientWithToken(endpoint, personalAccessToken string) (*Client, error) {
 
 	// For personal access token authentication, we use HTTP client directly
 	// as the Aliyun SDK's BearerTokenCredential may not work properly with DevOps API
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	// Create HTTP client with proxy support
+	httpClient := createHTTPClientWithProxy()
 
 	return &Client{
 		httpClient:          httpClient,
@@ -555,14 +625,35 @@ func (c *Client) ListPipelineGroupPipelines(organizationId string, groupId int, 
 }
 
 // runPipelineWithToken triggers a pipeline run using personal access token authentication
+// Based on official API: https://help.aliyun.com/zh/yunxiao/developer-reference/createpipelinerun
 func (c *Client) runPipelineWithToken(organizationId, pipelineIdStr string, params map[string]string) (*PipelineRun, error) {
-	// Based on Aliyun DevOps API pattern, pipeline execution might follow similar structure
-	// This needs to be updated with the correct API endpoint for running pipelines
-	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/run", organizationId, pipelineIdStr)
+	// Correct API endpoint according to official documentation
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/runs", organizationId, pipelineIdStr)
 
-	// Prepare request body with parameters
+	// Prepare request body according to official API documentation
+	// The params should be a JSON string containing pipeline parameters
+	var paramsJSON string
+	if params != nil && len(params) > 0 {
+		// The params map already contains JSON strings for each parameter
+		// We need to construct the final JSON object directly
+		if runningBranchsJSON, ok := params["runningBranchs"]; ok {
+			// runningBranchsJSON is already a JSON string, use it directly
+			paramsJSON = fmt.Sprintf("{\"runningBranchs\": %s}", runningBranchsJSON)
+		} else {
+			// Fallback: marshal the entire params map
+			paramsBytes, err := json.Marshal(params)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal params to JSON: %w", err)
+			}
+			paramsJSON = string(paramsBytes)
+		}
+	} else {
+		// Default empty params
+		paramsJSON = "{}"
+	}
+
 	requestBody := map[string]interface{}{
-		"parameters": params,
+		"params": paramsJSON,
 	}
 
 	response, err := c.makeTokenRequest("POST", path, requestBody)
@@ -570,42 +661,64 @@ func (c *Client) runPipelineWithToken(organizationId, pipelineIdStr string, para
 		return nil, fmt.Errorf("failed to run pipeline with token: %w", err)
 	}
 
-	// Check if the response has a success indicator
-	if success, ok := response["success"].(bool); ok && !success {
-		errorMsg, _ := response["errorMessage"].(string)
-		errorCode, _ := response["errorCode"].(string)
-		return nil, fmt.Errorf("API error: %s (ErrorCode: %s)", errorMsg, errorCode)
+	// According to the official API documentation, the response is just an integer (run ID)
+	var runID string
+
+	// The makeTokenRequest returns map[string]interface{}, but according to API docs,
+	// CreatePipelineRun returns a simple integer. Let's check different possible response formats.
+
+	// Check if response contains the run ID directly as a value
+	for _, value := range response {
+		if runIdFloat, ok := value.(float64); ok {
+			runID = fmt.Sprintf("%.0f", runIdFloat)
+			break
+		} else if runIdInt, ok := value.(int); ok {
+			runID = fmt.Sprintf("%d", runIdInt)
+			break
+		} else if runIdStr, ok := value.(string); ok {
+			runID = runIdStr
+			break
+		}
 	}
 
-	// Extract run ID from response
-	var runID string
-	if data, ok := response["data"]; ok {
-		if dataMap, ok := data.(map[string]interface{}); ok {
-			if id, ok := dataMap["runId"].(string); ok {
-				runID = id
-			} else if id, ok := dataMap["runId"].(float64); ok {
-				runID = fmt.Sprintf("%.0f", id)
-			} else if id, ok := dataMap["id"].(string); ok {
-				runID = id
-			} else if id, ok := dataMap["id"].(float64); ok {
-				runID = fmt.Sprintf("%.0f", id)
+	// If not found, check for common response field names
+	if runID == "" {
+		if data, ok := response["data"]; ok {
+			if runIdFloat, ok := data.(float64); ok {
+				runID = fmt.Sprintf("%.0f", runIdFloat)
+			} else if runIdInt, ok := data.(int); ok {
+				runID = fmt.Sprintf("%d", runIdInt)
+			} else if runIdStr, ok := data.(string); ok {
+				runID = runIdStr
+			}
+		} else if runIdValue, ok := response["runId"]; ok {
+			if runIdFloat, ok := runIdValue.(float64); ok {
+				runID = fmt.Sprintf("%.0f", runIdFloat)
+			} else if runIdInt, ok := runIdValue.(int); ok {
+				runID = fmt.Sprintf("%d", runIdInt)
+			} else if runIdStr, ok := runIdValue.(string); ok {
+				runID = runIdStr
+			}
+		} else if idValue, ok := response["id"]; ok {
+			if runIdFloat, ok := idValue.(float64); ok {
+				runID = fmt.Sprintf("%.0f", runIdFloat)
+			} else if runIdInt, ok := idValue.(int); ok {
+				runID = fmt.Sprintf("%d", runIdInt)
+			} else if runIdStr, ok := idValue.(string); ok {
+				runID = runIdStr
 			}
 		}
-	} else if runId, ok := response["runId"].(string); ok {
-		runID = runId
-	} else if runId, ok := response["runId"].(float64); ok {
-		runID = fmt.Sprintf("%.0f", runId)
 	}
 
 	if runID == "" {
-		return nil, fmt.Errorf("failed to extract run ID from response")
+		return nil, fmt.Errorf("failed to extract run ID from response: %+v", response)
 	}
 
 	// Return a minimal PipelineRun object
 	return &PipelineRun{
 		RunID:      runID,
 		PipelineID: pipelineIdStr,
-		Status:     "QUEUED", // Assuming it's queued; actual status needs GetPipelineRun
+		Status:     "RUNNING", // According to API docs, newly created runs are typically RUNNING
 	}, nil
 }
 
@@ -701,6 +814,250 @@ func (c *Client) StopPipelineRun(organizationId string, pipelineId string, runId
 	// request.RunId = runId
 	// ...
 	return fmt.Errorf("not implemented: StopPipelineRun")
+}
+
+// PipelineRunInfo contains detailed information about a pipeline run including repository information
+type PipelineRunInfo struct {
+	*PipelineRun
+	RepositoryURLs map[string]string // Map of repository URL to branch name from last run
+}
+
+// GetLatestPipelineRun retrieves the latest pipeline run information
+// Based on official API: https://help.aliyun.com/zh/yunxiao/developer-reference/getlatestpipelinerun
+func (c *Client) GetLatestPipelineRun(organizationId, pipelineId string) (*PipelineRun, error) {
+	if organizationId == "" {
+		return nil, fmt.Errorf("organizationId is required")
+	}
+	if pipelineId == "" {
+		return nil, fmt.Errorf("pipelineId is required")
+	}
+
+	// Use token-based authentication (only supported method for this API)
+	if !c.useToken {
+		return nil, fmt.Errorf("GetLatestPipelineRun only supports personal access token authentication")
+	}
+
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/runs/latestPipelineRun", organizationId, pipelineId)
+
+	response, err := c.makeTokenRequest("GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest pipeline run: %w", err)
+	}
+
+	// Parse the response according to the API documentation
+	run := &PipelineRun{}
+
+	// Extract basic run information
+	if pipelineRunId, ok := response["pipelineRunId"]; ok {
+		if runIdFloat, ok := pipelineRunId.(float64); ok {
+			run.RunID = fmt.Sprintf("%.0f", runIdFloat)
+		} else if runIdStr, ok := pipelineRunId.(string); ok {
+			run.RunID = runIdStr
+		}
+	}
+
+	if pipelineIdValue, ok := response["pipelineId"]; ok {
+		if pipelineIdFloat, ok := pipelineIdValue.(float64); ok {
+			run.PipelineID = fmt.Sprintf("%.0f", pipelineIdFloat)
+		} else if pipelineIdStr, ok := pipelineIdValue.(string); ok {
+			run.PipelineID = pipelineIdStr
+		}
+	}
+
+	if status, ok := response["status"].(string); ok {
+		run.Status = status
+	}
+
+	// Parse trigger mode
+	if triggerMode, ok := response["triggerMode"]; ok {
+		if triggerModeFloat, ok := triggerMode.(float64); ok {
+			switch int(triggerModeFloat) {
+			case 1:
+				run.TriggerMode = "MANUAL"
+			case 2:
+				run.TriggerMode = "SCHEDULE"
+			case 3:
+				run.TriggerMode = "PUSH"
+			case 5:
+				run.TriggerMode = "PIPELINE"
+			case 6:
+				run.TriggerMode = "WEBHOOK"
+			default:
+				run.TriggerMode = fmt.Sprintf("UNKNOWN_%d", int(triggerModeFloat))
+			}
+		}
+	}
+
+	// Parse timestamps
+	if createTime, ok := response["createTime"]; ok {
+		if createTimeFloat, ok := createTime.(float64); ok {
+			run.StartTime = time.Unix(int64(createTimeFloat)/1000, 0)
+		}
+	}
+
+	if endTime, ok := response["endTime"]; ok {
+		if endTimeFloat, ok := endTime.(float64); ok {
+			run.FinishTime = time.Unix(int64(endTimeFloat)/1000, 0)
+		}
+	}
+
+	return run, nil
+}
+
+// GetLatestPipelineRunInfo retrieves the latest pipeline run information with repository details
+func (c *Client) GetLatestPipelineRunInfo(organizationId, pipelineId string) (*PipelineRunInfo, error) {
+	if organizationId == "" {
+		return nil, fmt.Errorf("organizationId is required")
+	}
+	if pipelineId == "" {
+		return nil, fmt.Errorf("pipelineId is required")
+	}
+
+	// Use token-based authentication (only supported method for this API)
+	if !c.useToken {
+		return nil, fmt.Errorf("GetLatestPipelineRunInfo only supports personal access token authentication")
+	}
+
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/runs/latestPipelineRun", organizationId, pipelineId)
+
+	response, err := c.makeTokenRequest("GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest pipeline run: %w", err)
+	}
+
+	// Parse the response according to the API documentation
+	run := &PipelineRun{}
+	runInfo := &PipelineRunInfo{
+		PipelineRun:    run,
+		RepositoryURLs: make(map[string]string),
+	}
+
+	// Extract basic run information
+	if pipelineRunId, ok := response["pipelineRunId"]; ok {
+		if runIdFloat, ok := pipelineRunId.(float64); ok {
+			run.RunID = fmt.Sprintf("%.0f", runIdFloat)
+		} else if runIdStr, ok := pipelineRunId.(string); ok {
+			run.RunID = runIdStr
+		}
+	}
+
+	if pipelineIdValue, ok := response["pipelineId"]; ok {
+		if pipelineIdFloat, ok := pipelineIdValue.(float64); ok {
+			run.PipelineID = fmt.Sprintf("%.0f", pipelineIdFloat)
+		} else if pipelineIdStr, ok := pipelineIdValue.(string); ok {
+			run.PipelineID = pipelineIdStr
+		}
+	}
+
+	if status, ok := response["status"].(string); ok {
+		run.Status = status
+	}
+
+	// Parse trigger mode
+	if triggerMode, ok := response["triggerMode"]; ok {
+		if triggerModeFloat, ok := triggerMode.(float64); ok {
+			switch int(triggerModeFloat) {
+			case 1:
+				run.TriggerMode = "MANUAL"
+			case 2:
+				run.TriggerMode = "SCHEDULE"
+			case 3:
+				run.TriggerMode = "PUSH"
+			case 5:
+				run.TriggerMode = "PIPELINE"
+			case 6:
+				run.TriggerMode = "WEBHOOK"
+			default:
+				run.TriggerMode = fmt.Sprintf("UNKNOWN_%d", int(triggerModeFloat))
+			}
+		}
+	}
+
+	// Parse timestamps
+	if createTime, ok := response["createTime"]; ok {
+		if createTimeFloat, ok := createTime.(float64); ok {
+			run.StartTime = time.Unix(int64(createTimeFloat)/1000, 0)
+		}
+	}
+
+	if endTime, ok := response["endTime"]; ok {
+		if endTimeFloat, ok := endTime.(float64); ok {
+			run.FinishTime = time.Unix(int64(endTimeFloat)/1000, 0)
+		}
+	}
+
+	// Extract repository information from sources
+	if sources, ok := response["sources"]; ok {
+		if sourcesArray, ok := sources.([]interface{}); ok {
+			for _, source := range sourcesArray {
+				if sourceMap, ok := source.(map[string]interface{}); ok {
+					// Check for repository URL in data.repo field (new structure)
+					if dataMap, ok := sourceMap["data"].(map[string]interface{}); ok {
+						if repoUrl, ok := dataMap["repo"].(string); ok {
+							// Extract branch information from data.branch
+							branch := "master" // default branch
+							if branchInfo, ok := dataMap["branch"].(string); ok && branchInfo != "" {
+								branch = branchInfo
+							}
+							runInfo.RepositoryURLs[repoUrl] = branch
+							if os.Getenv("FLOWT_DEBUG") == "1" {
+								debugLogger.Printf("Extracted repository from sources[].data: %s -> %s", repoUrl, branch)
+							}
+						}
+					} else if repoUrl, ok := sourceMap["repoUrl"].(string); ok {
+						// Fallback: check for direct repoUrl field (old structure)
+						branch := "master" // default branch
+						if branchInfo, ok := sourceMap["branch"].(string); ok && branchInfo != "" {
+							branch = branchInfo
+						} else if branchInfo, ok := sourceMap["branchName"].(string); ok && branchInfo != "" {
+							branch = branchInfo
+						}
+						runInfo.RepositoryURLs[repoUrl] = branch
+						if os.Getenv("FLOWT_DEBUG") == "1" {
+							debugLogger.Printf("Extracted repository from sources[].repoUrl: %s -> %s", repoUrl, branch)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If no repository information found in sources, try to extract from other fields
+	if len(runInfo.RepositoryURLs) == 0 {
+		// Try to extract from pipeline configuration or other fields
+		// This might be in different locations depending on the API response structure
+		if pipelineConfig, ok := response["pipelineConfig"]; ok {
+			if configMap, ok := pipelineConfig.(map[string]interface{}); ok {
+				if sources, ok := configMap["sources"]; ok {
+					if sourcesArray, ok := sources.([]interface{}); ok {
+						for _, source := range sourcesArray {
+							if sourceMap, ok := source.(map[string]interface{}); ok {
+								// Check for repository URL in data.repo field (new structure)
+								if dataMap, ok := sourceMap["data"].(map[string]interface{}); ok {
+									if repoUrl, ok := dataMap["repo"].(string); ok {
+										branch := "master"
+										if branchInfo, ok := dataMap["branch"].(string); ok && branchInfo != "" {
+											branch = branchInfo
+										}
+										runInfo.RepositoryURLs[repoUrl] = branch
+									}
+								} else if repoUrl, ok := sourceMap["repoUrl"].(string); ok {
+									// Fallback: check for direct repoUrl field (old structure)
+									branch := "master"
+									if branchInfo, ok := sourceMap["branch"].(string); ok && branchInfo != "" {
+										branch = branchInfo
+									}
+									runInfo.RepositoryURLs[repoUrl] = branch
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return runInfo, nil
 }
 
 // GetPipelineRun retrieves details of a specific pipeline run using GetPipelineInstanceInfo SDK method.

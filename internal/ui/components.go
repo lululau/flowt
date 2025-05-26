@@ -2,6 +2,7 @@ package ui
 
 import (
 	"aliyun-pipelines-tui/internal/api"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -321,6 +322,171 @@ func updateGroupTable(table *tview.Table, app *tview.Application) {
 	if table.GetRowCount() > 1 {
 		table.Select(1, 0) // Select first data row
 	}
+}
+
+// showRunPipelineDialog shows a dialog to collect branch information and run the pipeline
+func showRunPipelineDialog(selectedPipeline *api.Pipeline, app *tview.Application, apiClient *api.Client, orgId string) {
+	// First, try to get the latest run to pre-fill branch information and extract repository URLs
+	var defaultBranch string = "master" // Default branch name
+	var repositoryURLs map[string]string = make(map[string]string)
+
+	// Try to get latest run information to extract branch and repository information from previous run
+	go func() {
+		latestRunInfo, err := apiClient.GetLatestPipelineRunInfo(orgId, selectedPipeline.PipelineID)
+		if err == nil && latestRunInfo != nil && len(latestRunInfo.RepositoryURLs) > 0 {
+			// Use repository information from the latest run
+			repositoryURLs = latestRunInfo.RepositoryURLs
+			// Use the first repository's branch as default
+			for _, branch := range latestRunInfo.RepositoryURLs {
+				defaultBranch = branch
+				break
+			}
+		}
+
+		app.QueueUpdateDraw(func() {
+			showBranchInputDialog(selectedPipeline, app, apiClient, orgId, defaultBranch, repositoryURLs)
+		})
+	}()
+}
+
+// showBranchInputDialog shows an input dialog for branch selection
+func showBranchInputDialog(selectedPipeline *api.Pipeline, app *tview.Application, apiClient *api.Client, orgId, defaultBranch string, repositoryURLs map[string]string) {
+	// Create a form for branch input
+	form := tview.NewForm()
+	form.SetBorder(true).SetTitle(fmt.Sprintf("Run Pipeline: %s", selectedPipeline.Name))
+	form.SetBackgroundColor(tcell.ColorDefault)
+
+	// Add branch input field
+	branchInput := ""
+	form.AddInputField("Branch Name:", defaultBranch, 30, nil, func(text string) {
+		branchInput = text
+	})
+
+	// Add buttons
+	form.AddButton("Run", func() {
+		if branchInput == "" {
+			branchInput = defaultBranch
+		}
+
+		// Hide the form
+		mainPagesGlobal.RemovePage("branch_input")
+
+		// Prepare parameters for the pipeline run using the correct format
+		// Build runningBranchs map with repository URLs from latest run
+		runningBranchs := make(map[string]string)
+
+		if len(repositoryURLs) > 0 {
+			// Use repository URLs from the latest run
+			for repoUrl := range repositoryURLs {
+				runningBranchs[repoUrl] = branchInput
+			}
+		} else {
+			// Fallback: use a placeholder repository URL
+			// This should be replaced with actual repository detection logic
+			runningBranchs["https://gitlab.example.com/default/repo.git"] = branchInput
+		}
+
+		// Convert runningBranchs to JSON string
+		runningBranchsJSON, err := json.Marshal(runningBranchs)
+		if err != nil {
+			ShowModal("Error", fmt.Sprintf("Failed to prepare parameters: %v", err), []string{"OK"}, nil)
+			return
+		}
+
+		params := map[string]string{
+			"runningBranchs": string(runningBranchsJSON),
+		}
+
+		// Run the pipeline
+		runPipelineWithBranch(selectedPipeline, app, apiClient, orgId, params, repositoryURLs)
+	})
+
+	form.AddButton("Cancel", func() {
+		mainPagesGlobal.RemovePage("branch_input")
+		app.SetFocus(pipelineTableGlobal)
+	})
+
+	// Set form styling
+	form.SetButtonBackgroundColor(tcell.ColorDefault)
+	form.SetButtonTextColor(tcell.ColorWhite)
+	form.SetFieldBackgroundColor(tcell.ColorDefault)
+	form.SetFieldTextColor(tcell.ColorWhite)
+	form.SetLabelColor(tcell.ColorWhite)
+
+	// Add the form to pages and show it
+	mainPagesGlobal.AddPage("branch_input", form, true, true)
+	app.SetFocus(form)
+}
+
+// runPipelineWithBranch executes the pipeline with the specified branch parameters
+func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Application, apiClient *api.Client, orgId string, params map[string]string, repositoryURLs map[string]string) {
+	currentPipelineIDForRun = selectedPipeline.PipelineID
+
+	go func() { // Run in goroutine to avoid blocking UI
+		// Extract branch name and repository info for display
+		var branchInfo string
+		var repoInfo string
+
+		if runningBranchsParam, ok := params["runningBranchs"]; ok {
+			var runningBranchs map[string]string
+			if err := json.Unmarshal([]byte(runningBranchsParam), &runningBranchs); err == nil {
+				if len(runningBranchs) > 0 {
+					for repoUrl, branch := range runningBranchs {
+						branchInfo = branch
+						repoInfo = repoUrl
+						break // Use the first repository for display
+					}
+				}
+			}
+		}
+
+		if branchInfo == "" {
+			branchInfo = "master"
+		}
+
+		app.QueueUpdateDraw(func() {
+			logText := fmt.Sprintf("Initiating pipeline run for '%s'...\nBranch: %s\n", selectedPipeline.Name, branchInfo)
+			if repoInfo != "" {
+				logText += fmt.Sprintf("Repository: %s\n", repoInfo)
+			}
+			logViewTextView.SetText(logText)
+			mainPagesGlobal.SwitchToPage("logs")
+			app.SetFocus(logViewTextView)
+		})
+
+		runResponse, err := apiClient.RunPipeline(orgId, selectedPipeline.PipelineID, params)
+		if err != nil {
+			app.QueueUpdateDraw(func() {
+				ShowModal("Error", fmt.Sprintf("Failed to run pipeline: %v", err), []string{"OK"}, nil)
+			})
+			return
+		}
+		currentRunID = runResponse.RunID
+		isLogViewActive = true
+
+		app.QueueUpdateDraw(func() {
+			logText := fmt.Sprintf("Pipeline '%s' triggered successfully!\nRun ID: %s\nBranch: %s\n",
+				selectedPipeline.Name, currentRunID, branchInfo)
+			if repoInfo != "" {
+				logText += fmt.Sprintf("Repository: %s\n", repoInfo)
+			}
+			logText += "Fetching run details...\n"
+			logViewTextView.SetText(logText)
+			logViewTextView.ScrollToEnd()
+		})
+
+		// Fetch initial run details
+		runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
+		app.QueueUpdateDraw(func() {
+			if err != nil {
+				fmt.Fprintf(logViewTextView, "\nError getting run details: %v\n", err)
+			} else {
+				fmt.Fprintf(logViewTextView, "\nRun Details:\nRun ID: %s\nStatus: %s\nTrigger: %s\nStart: %s\nFinish: %s\n\nPress 'q' to return to pipeline list.\n",
+					runDetails.RunID, runDetails.Status, runDetails.TriggerMode, runDetails.StartTime.String(), runDetails.FinishTime.String())
+			}
+			logViewTextView.ScrollToEnd()
+		})
+	}()
 }
 
 // updateRunHistoryTable updates the run history table for a specific pipeline
@@ -688,47 +854,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		case 'r': // Run pipeline
 			if rowCount > 1 && currentRow > 0 {
 				if selectedPipeline, ok := pipelineRowMap[currentRow]; ok && selectedPipeline != nil {
-					currentPipelineIDForRun = selectedPipeline.PipelineID
-					// Show confirmation or directly run
-					ShowModal("Run Pipeline?", fmt.Sprintf("Run '%s'?", selectedPipeline.Name), []string{"Run", "Cancel"},
-						func(buttonIndex int, buttonLabel string) {
-							if buttonLabel == "Run" {
-								go func() { // Run in goroutine to avoid blocking UI
-									app.QueueUpdateDraw(func() {
-										logViewTextView.SetText("Initiating pipeline run...")
-										mainPages.SwitchToPage("logs")
-										app.SetFocus(logViewTextView)
-									})
-
-									runResponse, err := apiClient.RunPipeline(orgId, selectedPipeline.PipelineID, nil)
-									if err != nil {
-										app.QueueUpdateDraw(func() {
-											ShowModal("Error", fmt.Sprintf("Failed to run pipeline: %v", err), []string{"OK"}, nil)
-										})
-										return
-									}
-									currentRunID = runResponse.RunID
-									isLogViewActive = true
-
-									app.QueueUpdateDraw(func() {
-										logViewTextView.SetText(fmt.Sprintf("Pipeline '%s' triggered. Run ID: %s\nFetching run details...\n", selectedPipeline.Name, currentRunID))
-										logViewTextView.ScrollToEnd()
-									})
-
-									// Fetch initial run details
-									runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
-									app.QueueUpdateDraw(func() {
-										if err != nil {
-											fmt.Fprintf(logViewTextView, "\nError getting run details: %v\n", err)
-										} else {
-											fmt.Fprintf(logViewTextView, "\nRun ID: %s\nStatus: %s\nTrigger: %s\nStart: %s\nFinish: %s\n\nFetching logs is not fully implemented yet. Requires JobID.\n",
-												runDetails.RunID, runDetails.Status, runDetails.TriggerMode, runDetails.StartTime.String(), runDetails.FinishTime.String())
-										}
-										logViewTextView.ScrollToEnd()
-									})
-								}()
-							}
-						})
+					showRunPipelineDialog(selectedPipeline, app, apiClient, orgId)
 				}
 			}
 			return nil
