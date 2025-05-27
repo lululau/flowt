@@ -1,4 +1,4 @@
-name: Build Multi-Platform Binaries
+name: Build Multi-Platform Binaries (Simple)
 
 on:
   workflow_dispatch:
@@ -11,29 +11,26 @@ on:
 
 jobs:
   build:
-    name: Build for ${{ matrix.goos }}-${{ matrix.goarch }}
+    name: Build for ${{ matrix.platform }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          # macOS
-          - goos: darwin
+          - platform: macos-intel-x64
+            goos: darwin
             goarch: amd64
-            name: macos-intel-x64
-          - goos: darwin
+          - platform: macos-aarch64
+            goos: darwin
             goarch: arm64
-            name: macos-aarch64
-          # Linux
-          - goos: linux
+          - platform: linux-x64
+            goos: linux
             goarch: amd64
-            name: linux-x64
-          - goos: linux
+          - platform: linux-arm64
+            goos: linux
             goarch: arm64
-            name: linux-arm64
-          # Windows
-          - goos: windows
+          - platform: windows-x64
+            goos: windows
             goarch: amd64
-            name: windows-x64
             ext: .exe
 
     steps:
@@ -44,22 +41,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Create dist directory
-        run: mkdir -p dist
+          cache: true
 
       - name: Build binary
         env:
@@ -67,18 +49,19 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          OUTPUT_NAME="flowt-${{ inputs.version }}-${{ matrix.name }}${{ matrix.ext }}"
+          mkdir -p dist
+          OUTPUT_NAME="flowt-${{ inputs.version }}-${{ matrix.platform }}${{ matrix.ext }}"
           go build -ldflags="-s -w -X main.version=${{ inputs.version }}" -o "dist/${OUTPUT_NAME}" ./cmd/aliyun-pipelines-tui
-          echo "BINARY_NAME=${OUTPUT_NAME}" >> $GITHUB_ENV
+          ls -la dist/
 
-      - name: Upload artifact
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: flowt-${{ matrix.name }}
-          path: dist/flowt-${{ inputs.version }}-${{ matrix.name }}${{ matrix.ext }}
+          name: ${{ matrix.platform }}
+          path: dist/flowt-${{ inputs.version }}-${{ matrix.platform }}${{ matrix.ext }}
           retention-days: 30
 
-  create-release:
+  release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
@@ -88,30 +71,45 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download macos-intel-x64
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: macos-intel-x64
+          path: release/
 
-      - name: Prepare release assets
-        run: |
-          mkdir -p release
-          # Copy all flowt binaries from artifact directories
-          find artifacts -name "flowt-*" -type f -exec cp {} release/ \;
-          # List what we found
-          echo "Found artifacts:"
-          ls -la artifacts/
-          echo "Release files:"
-          ls -la release/
+      - name: Download macos-aarch64
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-aarch64
+          path: release/
+
+      - name: Download linux-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x64
+          path: release/
+
+      - name: Download linux-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64
+          path: release/
+
+      - name: Download windows-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x64
+          path: release/
 
       - name: Generate checksums
         run: |
           cd release
           sha256sum * > checksums.txt
+          echo "Generated checksums:"
           cat checksums.txt
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version }}
           name: Release ${{ inputs.version }}
@@ -156,14 +154,13 @@ jobs:
             ---
             
             **完整文档**: [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
-          files: |
-            release/*
+          files: release/*
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-summary:
+  summary:
     name: Build Summary
     needs: build
     runs-on: ubuntu-latest

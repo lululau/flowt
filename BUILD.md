@@ -14,8 +14,19 @@
 
 ### 手动触发构建
 
+我们提供了两个 GitHub Actions workflow：
+
+#### 方式一：Build Multi-Platform Binaries (推荐)
 1. 访问 GitHub 仓库的 Actions 页面
 2. 选择 "Build Multi-Platform Binaries" workflow
+3. 点击 "Run workflow"
+4. 输入版本号（如 `v1.0.0`）
+5. 点击 "Run workflow" 开始构建
+
+#### 方式二：Build Multi-Platform Binaries (Simple) (备用)
+如果主 workflow 遇到问题，可以使用简化版本：
+1. 访问 GitHub 仓库的 Actions 页面
+2. 选择 "Build Multi-Platform Binaries (Simple)" workflow
 3. 点击 "Run workflow"
 4. 输入版本号（如 `v1.0.0`）
 5. 点击 "Run workflow" 开始构建
