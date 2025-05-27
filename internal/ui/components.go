@@ -290,23 +290,33 @@ func updateLogStatusBar() {
 	var statusText string
 	var statusColor tcell.Color
 
+	// Build status part
+	var statusPart string
 	switch strings.ToUpper(currentRunStatus) {
 	case "RUNNING":
-		statusText = fmt.Sprintf("Status: [green]%s[-] | Auto-refresh: ON", currentRunStatus)
-		statusColor = tcell.ColorDefault
+		statusPart = fmt.Sprintf("Status: [green]%s[-]", currentRunStatus)
 	case "SUCCESS":
-		statusText = fmt.Sprintf("Status: [white]%s[-] | Auto-refresh: %s", currentRunStatus, getAutoRefreshStatus())
-		statusColor = tcell.ColorDefault
+		statusPart = fmt.Sprintf("Status: [white]%s[-]", currentRunStatus)
 	case "FAILED":
-		statusText = fmt.Sprintf("Status: [red]%s[-] | Auto-refresh: %s", currentRunStatus, getAutoRefreshStatus())
-		statusColor = tcell.ColorDefault
+		statusPart = fmt.Sprintf("Status: [red]%s[-]", currentRunStatus)
 	case "CANCELED":
-		statusText = fmt.Sprintf("Status: [gray]%s[-] | Auto-refresh: %s", currentRunStatus, getAutoRefreshStatus())
-		statusColor = tcell.ColorDefault
+		statusPart = fmt.Sprintf("Status: [gray]%s[-]", currentRunStatus)
 	default:
-		statusText = fmt.Sprintf("Status: [white]%s[-] | Auto-refresh: ON", currentRunStatus)
-		statusColor = tcell.ColorDefault
+		statusPart = fmt.Sprintf("Status: [white]%s[-]", currentRunStatus)
 	}
+
+	// Build auto-refresh part (only for newly created runs or running historical runs)
+	var autoRefreshPart string
+	if isNewlyCreatedRun || strings.ToUpper(currentRunStatus) == "RUNNING" {
+		autoRefreshPart = fmt.Sprintf(" | Auto-refresh: %s", getAutoRefreshStatus())
+	}
+
+	// Build instructions part
+	instructionsPart := " | Press 'r' to refresh, 'q' to return, 'e' to edit, 'v' to view in pager"
+
+	// Combine all parts
+	statusText = statusPart + autoRefreshPart + instructionsPart
+	statusColor = tcell.ColorDefault
 
 	logStatusBar.SetText(statusText)
 	logStatusBar.SetTextColor(statusColor)
@@ -719,6 +729,7 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 		currentRunID = runResponse.RunID
 		currentRunStatus = "RUNNING" // New runs start as RUNNING
 		isLogViewActive = true
+		isNewlyCreatedRun = true // Mark this as a newly created run
 
 		app.QueueUpdateDraw(func() {
 			logText := fmt.Sprintf("Pipeline '%s' triggered successfully!\nRun ID: %s\nBranch: %s\n",
@@ -735,7 +746,7 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 			updateLogStatusBar()
 		})
 
-		// Start automatic log fetching and refreshing every 5 seconds
+		// Start automatic log fetching and refreshing every 5 seconds for newly created runs
 		startLogAutoRefresh(app, apiClient, orgId, selectedPipeline.Name, branchInfo, repoInfo)
 	}()
 }
@@ -747,6 +758,8 @@ var (
 	// Variables for delayed auto-refresh stop
 	finishedRefreshCount int  // Count of refreshes after pipeline finished
 	pipelineFinished     bool // Whether pipeline has finished
+	// Track if current log view is for a newly created run or running historical run
+	isNewlyCreatedRun bool // Whether this is a newly created run (should auto-refresh)
 )
 
 // startLogAutoRefresh starts automatic log fetching and refreshing every 5 seconds
@@ -757,6 +770,17 @@ func startLogAutoRefresh(app *tview.Application, apiClient *api.Client, orgId, p
 	// Reset delayed stop state
 	finishedRefreshCount = 0
 	pipelineFinished = false
+
+	// Only start auto-refresh for newly created runs or running historical runs
+	shouldAutoRefresh := isNewlyCreatedRun || strings.ToUpper(currentRunStatus) == "RUNNING"
+
+	// Always fetch logs at least once
+	fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+
+	// Only start ticker if auto-refresh is needed
+	if !shouldAutoRefresh {
+		return
+	}
 
 	// Create new ticker and stop channel
 	logRefreshTicker = time.NewTicker(5 * time.Second)
@@ -785,9 +809,6 @@ func startLogAutoRefresh(app *tview.Application, apiClient *api.Client, orgId, p
 				}
 			}
 		}()
-
-		// Initial log fetch
-		fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
 
 		for {
 			select {
@@ -897,9 +918,8 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 			logText.WriteString(logs)
 		}
 
-		// Add footer with instructions
+		// Add footer separator (instructions now in status bar)
 		logText.WriteString("\n" + strings.Repeat("=", 80) + "\n")
-		logText.WriteString("Auto-refreshing every 5 seconds. Press 'r' to refresh manually, 'q' to return, 'e' to edit in editor, 'v' to view in pager.\n")
 
 		// Handle delayed auto-refresh stop logic
 		if extractedStatus == "SUCCESS" || extractedStatus == "FAILED" || extractedStatus == "CANCELED" {
@@ -1562,6 +1582,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					currentRunID = selectedRun.RunID
 					currentRunStatus = selectedRun.Status // Initialize status from selected run
 					isLogViewActive = true
+					isNewlyCreatedRun = false // Mark this as a historical run
 
 					// Switch to log view and start auto-refresh for historical runs
 					go func() {
@@ -1580,7 +1601,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 						branchInfo := "N/A" // Historical runs don't have branch info readily available
 						repoInfo := ""
 
-						// Start auto-refresh for this historical run (but only refresh once for completed runs)
+						// Start auto-refresh for this historical run (only for running/queued status)
 						if selectedRun.Status == "RUNNING" || selectedRun.Status == "QUEUED" {
 							// Only auto-refresh for running pipelines
 							startLogAutoRefresh(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
