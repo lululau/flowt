@@ -52,19 +52,17 @@ go build -o flowt ./cmd/aliyun-pipelines-tui
 创建配置文件 `flowt.yml`：
 
 ```yaml
-# 阿里云认证配置
-aliyun:
-  # 方式1：使用 Personal Access Token（推荐）
-  personal_access_token: "your_personal_access_token"
-  endpoint: "openapi-rdc.aliyuncs.com"
-  
-  # 方式2：使用 AccessKey（可选）
-  # access_key_id: "your_access_key_id"
-  # access_key_secret: "your_access_key_secret"
-  # region_id: "cn-hangzhou"
-
-# 组织 ID
-organization_id: "your_organization_id"
+endpoint: openapi-rdc.aliyuncs.com
+personal_access_token: pt-XXXXXXXXXXXXXXXXXXXXXXXX_XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+organization_id: XXXXXXXXXXXXXXXXXXXXXXXXX
+access_key_id: ""
+access_key_secret: ""
+region_id: cn-hangzhou
+editor: nvim
+pager: lnav
+bookmarks:
+    - demo_staging
+    - demo_prod
 ```
 
 ## 使用方法
