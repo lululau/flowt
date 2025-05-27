@@ -158,6 +158,9 @@ var (
 	currentSearchQuery      string
 	currentGroupSearchQuery string // New: search query for groups
 
+	// Status filtering
+	showOnlyRunningWaiting bool // Toggle between all pipelines and RUNNING+WAITING only
+
 	// Global configuration for editor and pager
 	globalEditorCmd string
 	globalPagerCmd  string
@@ -312,9 +315,17 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 
 	var title string
 	if currentViewMode == "pipelines_in_group" {
-		title = fmt.Sprintf("Pipelines in '%s'", selectedGroupName)
+		if showOnlyRunningWaiting {
+			title = fmt.Sprintf("Pipelines in '%s' (RUNNING+WAITING)", selectedGroupName)
+		} else {
+			title = fmt.Sprintf("Pipelines in '%s'", selectedGroupName)
+		}
 	} else {
-		title = "All Pipelines"
+		if showOnlyRunningWaiting {
+			title = "Pipelines (RUNNING+WAITING)"
+		} else {
+			title = "All Pipelines"
+		}
 	}
 	table.SetTitle(title)
 
@@ -329,7 +340,7 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 		table.SetCell(0, col, cell)
 	}
 
-	// 1. Get pipelines based on current view mode
+	// 1. Get pipelines based on current view mode and status filter
 	var tempFilteredByGroup []api.Pipeline
 	if currentViewMode == "pipelines_in_group" && selectedGroupID != "" {
 		// Use the correct API to get pipelines in the selected group
@@ -357,8 +368,25 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 		}
 		tempFilteredByGroup = groupPipelines
 	} else {
-		// Use all pipelines for "all_pipelines" view
-		tempFilteredByGroup = append(tempFilteredByGroup, allPipelines...)
+		// Use all pipelines for "all_pipelines" view, with status filtering if enabled
+		if showOnlyRunningWaiting {
+			// Fetch pipelines with status filter
+			statusList := []string{"RUNNING", "WAITING"}
+			filteredPipelines, err := apiClient.ListPipelinesWithStatus(orgId, statusList)
+			if err != nil {
+				// Show error message
+				cell := tview.NewTableCell(fmt.Sprintf("Error fetching filtered pipelines: %v", err)).
+					SetTextColor(tcell.ColorRed).
+					SetAlign(tview.AlignCenter)
+				table.SetCell(1, 0, cell)
+				table.SetCell(1, 1, tview.NewTableCell(""))
+				return
+			}
+			tempFilteredByGroup = filteredPipelines
+		} else {
+			// Use cached all pipelines
+			tempFilteredByGroup = append(tempFilteredByGroup, allPipelines...)
+		}
 	}
 
 	// 2. Filter by search query (fuzzy search)
@@ -1021,6 +1049,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	currentGroupSearchQuery = ""
 	selectedGroupID = ""
 	selectedGroupName = ""
+	showOnlyRunningWaiting = false
 	isLogViewActive = false
 	isRunHistoryActive = false
 
@@ -1053,7 +1082,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Help info
 	helpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=run history, r=run, Ctrl+G=groups, /=search, q=back, Q=quit").
+		SetText("Keys: j/k=move, Enter=run history, r=run, a=toggle filter, Ctrl+G=groups, /=search, q=back, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	helpInfo.SetBackgroundColor(tcell.ColorDefault)
@@ -1125,7 +1154,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Run history help info
 	runHistoryHelpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=view logs, [/]=prev/next page, 0=first page, q=back to pipelines, Q=quit").
+		SetText("Keys: j/k=move, Enter=view logs, r=run pipeline, [/]=prev/next page, 0=first page, q=back to pipelines, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	runHistoryHelpInfo.SetBackgroundColor(tcell.ColorDefault)
@@ -1217,6 +1246,10 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					showRunPipelineDialog(selectedPipeline, app, apiClient, orgId)
 				}
 			}
+			return nil
+		case 'a': // Toggle status filter
+			showOnlyRunningWaiting = !showOnlyRunningWaiting
+			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			return nil
 		}
 		switch event.Key() {
@@ -1421,6 +1454,19 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				if runHistoryTable.GetRowCount() > 1 {
 					runHistoryTable.Select(1, 0) // Select first data row
 				}
+			}
+			return nil
+		case 'r': // Run pipeline
+			// Find the pipeline object for the current pipeline
+			var selectedPipeline *api.Pipeline
+			for _, p := range allPipelines {
+				if p.PipelineID == currentPipelineIDForRun {
+					selectedPipeline = &p
+					break
+				}
+			}
+			if selectedPipeline != nil {
+				showRunPipelineDialog(selectedPipeline, app, apiClient, orgId)
 			}
 			return nil
 		}

@@ -272,13 +272,19 @@ func NewClientWithToken(endpoint, personalAccessToken string) (*Client, error) {
 
 // ListPipelines retrieves a list of pipelines for a given organization.
 func (c *Client) ListPipelines(organizationId string) ([]Pipeline, error) {
+	return c.ListPipelinesWithStatus(organizationId, nil)
+}
+
+// ListPipelinesWithStatus lists pipelines with optional status filtering
+// statusList can be nil for all pipelines, or contain statuses like "RUNNING", "WAITING", etc.
+func (c *Client) ListPipelinesWithStatus(organizationId string, statusList []string) ([]Pipeline, error) {
 	if organizationId == "" {
 		return nil, fmt.Errorf("organizationId is required for ListPipelines")
 	}
 
 	// Use different methods based on authentication type
 	if c.useToken {
-		return c.listPipelinesWithToken(organizationId)
+		return c.listPipelinesWithTokenAndStatus(organizationId, statusList)
 	}
 
 	// Use SDK for AccessKey authentication
@@ -2172,6 +2178,10 @@ func (c *Client) makeTokenRequest(method, path string, body interface{}) (map[st
 
 // listPipelinesWithToken retrieves pipelines using personal access token authentication
 func (c *Client) listPipelinesWithToken(organizationId string) ([]Pipeline, error) {
+	return c.listPipelinesWithTokenAndStatus(organizationId, nil)
+}
+
+func (c *Client) listPipelinesWithTokenAndStatus(organizationId string, statusList []string) ([]Pipeline, error) {
 	// Based on official Aliyun DevOps API documentation:
 	// https://help.aliyun.com/zh/yunxiao/developer-reference/listpipelines-get-a-list-of-pipelines
 	// GET https://{domain}/oapi/v1/flow/organizations/{organizationId}/pipelines
@@ -2181,7 +2191,16 @@ func (c *Client) listPipelinesWithToken(organizationId string) ([]Pipeline, erro
 	perPage := 30 // Maximum per page according to API docs
 
 	for {
-		path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines?page=%d&perPage=%d", organizationId, page, perPage)
+		// Build query parameters
+		queryParams := fmt.Sprintf("page=%d&perPage=%d", page, perPage)
+
+		// Add status filtering if provided
+		if len(statusList) > 0 {
+			statusParam := strings.Join(statusList, ",")
+			queryParams += fmt.Sprintf("&statusList=%s", statusParam)
+		}
+
+		path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines?%s", organizationId, queryParams)
 
 		// Make the request and get raw response
 		url := fmt.Sprintf("https://%s%s", c.endpoint, path)
