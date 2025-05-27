@@ -40,6 +40,14 @@ func SetGlobalConfig(editorCmd, pagerCmd string) {
 	globalPagerCmd = pagerCmd
 }
 
+// SetBookmarkFunctions sets the global bookmark functions
+func SetBookmarkFunctions(toggleBookmark func(string) bool, isBookmarked func(string) bool, saveConfig func() error, bookmarks []string) {
+	globalToggleBookmark = toggleBookmark
+	globalIsBookmarked = isBookmarked
+	globalSaveConfig = saveConfig
+	globalBookmarks = bookmarks
+}
+
 // OpenInEditor opens the given text content in the configured editor
 func OpenInEditor(content string, app *tview.Application) error {
 	if globalEditorCmd == "" {
@@ -161,9 +169,18 @@ var (
 	// Status filtering
 	showOnlyRunningWaiting bool // Toggle between all pipelines and RUNNING+WAITING only
 
+	// Bookmark filtering
+	showOnlyBookmarked bool // Toggle between all pipelines and bookmarked only
+
 	// Global configuration for editor and pager
 	globalEditorCmd string
 	globalPagerCmd  string
+
+	// Global bookmark functions
+	globalToggleBookmark func(string) bool
+	globalIsBookmarked   func(string) bool
+	globalSaveConfig     func() error
+	globalBookmarks      []string
 
 	// Maps to store references for table rows
 	pipelineRowMap = make(map[int]*api.Pipeline)
@@ -315,13 +332,17 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 
 	var title string
 	if currentViewMode == "pipelines_in_group" {
-		if showOnlyRunningWaiting {
+		if showOnlyBookmarked {
+			title = fmt.Sprintf("Pipelines in '%s' (BOOKMARKED)", selectedGroupName)
+		} else if showOnlyRunningWaiting {
 			title = fmt.Sprintf("Pipelines in '%s' (RUNNING+WAITING)", selectedGroupName)
 		} else {
 			title = fmt.Sprintf("Pipelines in '%s'", selectedGroupName)
 		}
 	} else {
-		if showOnlyRunningWaiting {
+		if showOnlyBookmarked {
+			title = "Pipelines (BOOKMARKED)"
+		} else if showOnlyRunningWaiting {
 			title = "Pipelines (RUNNING+WAITING)"
 		} else {
 			title = "All Pipelines"
@@ -329,8 +350,8 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 	}
 	table.SetTitle(title)
 
-	// Set table headers - only ID and Name
-	headers := []string{"ID", "Pipeline Name"}
+	// Set table headers - with bookmark column
+	headers := []string{" ", "Name"}
 	for col, header := range headers {
 		cell := tview.NewTableCell(header).
 			SetTextColor(tcell.ColorYellow).
@@ -379,7 +400,9 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 					SetTextColor(tcell.ColorRed).
 					SetAlign(tview.AlignCenter)
 				table.SetCell(1, 0, cell)
-				table.SetCell(1, 1, tview.NewTableCell(""))
+				for i := 1; i < len(headers); i++ {
+					table.SetCell(1, i, tview.NewTableCell(""))
+				}
 				return
 			}
 			tempFilteredByGroup = filteredPipelines
@@ -401,8 +424,38 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 		tempFilteredBySearch = append(tempFilteredBySearch, tempFilteredByGroup...)
 	}
 
-	// Final filtered pipelines (no status filtering)
-	finalFilteredPipelines := tempFilteredBySearch
+	// 3. Filter by bookmark status if enabled
+	tempFilteredByBookmark := make([]api.Pipeline, 0)
+	if showOnlyBookmarked && globalIsBookmarked != nil {
+		for _, p := range tempFilteredBySearch {
+			if globalIsBookmarked(p.Name) {
+				tempFilteredByBookmark = append(tempFilteredByBookmark, p)
+			}
+		}
+	} else {
+		tempFilteredByBookmark = append(tempFilteredByBookmark, tempFilteredBySearch...)
+	}
+
+	// 4. Sort pipelines: bookmarked first, then others
+	finalFilteredPipelines := make([]api.Pipeline, 0)
+	bookmarkedPipelines := make([]api.Pipeline, 0)
+	nonBookmarkedPipelines := make([]api.Pipeline, 0)
+
+	if globalIsBookmarked != nil && !showOnlyBookmarked {
+		// Separate bookmarked and non-bookmarked pipelines
+		for _, p := range tempFilteredByBookmark {
+			if globalIsBookmarked(p.Name) {
+				bookmarkedPipelines = append(bookmarkedPipelines, p)
+			} else {
+				nonBookmarkedPipelines = append(nonBookmarkedPipelines, p)
+			}
+		}
+		// Combine: bookmarked first, then non-bookmarked
+		finalFilteredPipelines = append(finalFilteredPipelines, bookmarkedPipelines...)
+		finalFilteredPipelines = append(finalFilteredPipelines, nonBookmarkedPipelines...)
+	} else {
+		finalFilteredPipelines = tempFilteredByBookmark
+	}
 
 	// Clear the pipeline row map
 	pipelineRowMap = make(map[int]*api.Pipeline)
@@ -414,7 +467,9 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 			SetTextColor(tcell.ColorGray).
 			SetAlign(tview.AlignCenter)
 		table.SetCell(1, 0, cell)
-		table.SetCell(1, 1, tview.NewTableCell(""))
+		for i := 1; i < len(headers); i++ {
+			table.SetCell(1, i, tview.NewTableCell(""))
+		}
 	} else {
 		for i, p := range finalFilteredPipelines {
 			pipelineCopy := p // Important: capture range variable for reference
@@ -423,14 +478,18 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 			// Store the pipeline object in our map
 			pipelineRowMap[row] = &pipelineCopy
 
-			// Pipeline ID (left column)
-			idCell := tview.NewTableCell(pipelineCopy.PipelineID).
-				SetTextColor(tcell.ColorLightBlue).
-				SetAlign(tview.AlignLeft).
+			// Column 0: Bookmark indicator
+			bookmarkText := " "
+			if globalIsBookmarked != nil && globalIsBookmarked(pipelineCopy.Name) {
+				bookmarkText = "★"
+			}
+			bookmarkCell := tview.NewTableCell(bookmarkText).
+				SetTextColor(tcell.ColorYellow).
+				SetAlign(tview.AlignCenter).
 				SetBackgroundColor(tcell.ColorDefault)
-			table.SetCell(row, 0, idCell)
+			table.SetCell(row, 0, bookmarkCell)
 
-			// Pipeline Name (right column)
+			// Column 1: Pipeline Name
 			nameCell := tview.NewTableCell(pipelineCopy.Name).
 				SetTextColor(tcell.ColorWhite).
 				SetAlign(tview.AlignLeft).
@@ -1050,6 +1109,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	selectedGroupID = ""
 	selectedGroupName = ""
 	showOnlyRunningWaiting = false
+	showOnlyBookmarked = false
 	isLogViewActive = false
 	isRunHistoryActive = false
 
@@ -1064,6 +1124,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	pipelineTable.SetBorder(true).SetBackgroundColor(tcell.ColorDefault)
 	// Enable table to receive focus and handle input
 	pipelineTable.SetSelectable(true, false)
+	// Set selected row background color to light gray
+	pipelineTable.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorGray).Foreground(tcell.ColorWhite))
 	pipelineTableGlobal = pipelineTable // Set global reference
 
 	searchInput := tview.NewInputField().
@@ -1082,7 +1144,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Help info
 	helpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=run history, r=run, a=toggle filter, Ctrl+G=groups, /=search, q=back, Q=quit").
+		SetText("Keys: j/k=move, Enter=run history, r=run, a=toggle filter, b=toggle bookmarks, B=bookmark, Ctrl+G=groups, /=search, q=back, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	helpInfo.SetBackgroundColor(tcell.ColorDefault)
@@ -1096,6 +1158,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	groupTable.SetBorder(true).SetBackgroundColor(tcell.ColorDefault)
 	// Enable table to receive focus and handle input
 	groupTable.SetSelectable(true, false)
+	// Set selected row background color to light gray
+	groupTable.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorGray).Foreground(tcell.ColorWhite))
 	groupTableGlobal = groupTable
 
 	// Group search input
@@ -1151,6 +1215,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	runHistoryTable.SetBorder(true).SetBackgroundColor(tcell.ColorDefault)
 	// Enable table to receive focus and handle input
 	runHistoryTable.SetSelectable(true, false)
+	// Set selected row background color to light gray
+	runHistoryTable.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorGray).Foreground(tcell.ColorWhite))
 
 	// Run history help info
 	runHistoryHelpInfo := tview.NewTextView().
@@ -1250,6 +1316,25 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		case 'a': // Toggle status filter
 			showOnlyRunningWaiting = !showOnlyRunningWaiting
 			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
+			return nil
+		case 'b': // Toggle bookmark filter
+			showOnlyBookmarked = !showOnlyBookmarked
+			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
+			return nil
+		case 'B': // Toggle bookmark for current pipeline
+			if rowCount > 1 && currentRow > 0 {
+				if selectedPipeline, ok := pipelineRowMap[currentRow]; ok && selectedPipeline != nil {
+					if globalToggleBookmark != nil && globalSaveConfig != nil {
+						globalToggleBookmark(selectedPipeline.Name)
+						// Save configuration
+						if err := globalSaveConfig(); err != nil {
+							ShowModal("Error", fmt.Sprintf("Failed to save bookmark: %v", err), []string{"OK"}, nil)
+						}
+						// Refresh table to update bookmark indicators
+						updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
+					}
+				}
+			}
 			return nil
 		}
 		switch event.Key() {

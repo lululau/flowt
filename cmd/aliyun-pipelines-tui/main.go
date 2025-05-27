@@ -27,6 +27,8 @@ type Config struct {
 	// 编辑器和分页器配置
 	Editor string `yaml:"editor,omitempty"`
 	Pager  string `yaml:"pager,omitempty"`
+	// 书签配置
+	Bookmarks []string `yaml:"bookmarks,omitempty"`
 }
 
 // loadConfig loads configuration from ~/.config/flowt.yml
@@ -56,6 +58,35 @@ func loadConfig() (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// saveConfig saves configuration to ~/.config/flowt.yml
+func saveConfig(config *Config) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get user home directory: %w", err)
+	}
+
+	configPath := filepath.Join(homeDir, ".config", "flowt.yml")
+
+	// Ensure config directory exists
+	configDir := filepath.Dir(configPath)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	// Marshal config to YAML
+	data, err := yaml.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config to YAML: %w", err)
+	}
+
+	// Write config file
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
 }
 
 // validateConfig validates the configuration
@@ -117,6 +148,47 @@ func GetPager(config *Config) string {
 
 	// Default to less
 	return "less"
+}
+
+// AddBookmark adds a pipeline name to bookmarks if not already present
+func AddBookmark(config *Config, pipelineName string) bool {
+	for _, bookmark := range config.Bookmarks {
+		if bookmark == pipelineName {
+			return false // Already bookmarked
+		}
+	}
+	config.Bookmarks = append(config.Bookmarks, pipelineName)
+	return true // Added
+}
+
+// RemoveBookmark removes a pipeline name from bookmarks
+func RemoveBookmark(config *Config, pipelineName string) bool {
+	for i, bookmark := range config.Bookmarks {
+		if bookmark == pipelineName {
+			config.Bookmarks = append(config.Bookmarks[:i], config.Bookmarks[i+1:]...)
+			return true // Removed
+		}
+	}
+	return false // Not found
+}
+
+// ToggleBookmark toggles a pipeline name in bookmarks
+func ToggleBookmark(config *Config, pipelineName string) bool {
+	if RemoveBookmark(config, pipelineName) {
+		return false // Removed
+	}
+	AddBookmark(config, pipelineName)
+	return true // Added
+}
+
+// IsBookmarked checks if a pipeline name is bookmarked
+func IsBookmarked(config *Config, pipelineName string) bool {
+	for _, bookmark := range config.Bookmarks {
+		if bookmark == pipelineName {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
@@ -183,6 +255,14 @@ func main() {
 
 	// Set global config for UI components
 	ui.SetGlobalConfig(GetEditor(config), GetPager(config))
+
+	// Set bookmark functions for UI components
+	ui.SetBookmarkFunctions(
+		func(pipelineName string) bool { return ToggleBookmark(config, pipelineName) },
+		func(pipelineName string) bool { return IsBookmarked(config, pipelineName) },
+		func() error { return saveConfig(config) },
+		config.Bookmarks,
+	)
 
 	// Create the main view (Pages) using ui.NewMainView()
 	mainPages := ui.NewMainView(app, apiClient, config.OrganizationID) // Pass apiClient and orgId

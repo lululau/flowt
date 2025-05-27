@@ -43,6 +43,15 @@ endpoint: "openapi-rdc.aliyuncs.com"
 # pager: "less -R"
 # pager: "more"
 
+# ===== 书签配置 =====
+# 书签功能：在主界面按 B 键添加/移除书签，按 b 键切换显示模式
+# 书签的流水线会在列表中排在前面，并显示 ★ 标记
+
+# 书签列表 - 可选，存储收藏的流水线名称
+# bookmarks:
+#   - "my-important-pipeline"
+#   - "production-deployment"
+
 # 注意事项：
 # 1. 请妥善保管您的访问凭证，不要将其提交到公共代码仓库
 # 2. 建议定期轮换访问凭证以提高安全性
