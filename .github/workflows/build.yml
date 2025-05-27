@@ -1,0 +1,186 @@
+name: Build Multi-Platform Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+jobs:
+  build:
+    name: Build for ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # macOS
+          - goos: darwin
+            goarch: amd64
+            name: macos-intel-x64
+          - goos: darwin
+            goarch: arm64
+            name: macos-aarch64
+          # Linux
+          - goos: linux
+            goarch: amd64
+            name: linux-x64
+          - goos: linux
+            goarch: arm64
+            name: linux-arm64
+          # Windows
+          - goos: windows
+            goarch: amd64
+            name: windows-x64
+            ext: .exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22'
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          OUTPUT_NAME="flowt-${{ inputs.version }}-${{ matrix.name }}${{ matrix.ext }}"
+          go build -ldflags="-s -w -X main.version=${{ inputs.version }}" -o "dist/${OUTPUT_NAME}" ./cmd/aliyun-pipelines-tui
+          echo "BINARY_NAME=${OUTPUT_NAME}" >> $GITHUB_ENV
+
+      - name: Create dist directory
+        run: mkdir -p dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: flowt-${{ matrix.name }}
+          path: dist/flowt-${{ inputs.version }}-${{ matrix.name }}${{ matrix.ext }}
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event.inputs.version != ''
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -name "flowt-*" -type f -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.version }}
+          name: Release ${{ inputs.version }}
+          body: |
+            ## Flowt ${{ inputs.version }}
+            
+            阿里云云效流水线 TUI 工具
+            
+            ### 支持的平台
+            
+            - **macOS Intel (x64)**: `flowt-${{ inputs.version }}-macos-intel-x64`
+            - **macOS Apple Silicon (ARM64)**: `flowt-${{ inputs.version }}-macos-aarch64`
+            - **Linux x64**: `flowt-${{ inputs.version }}-linux-x64`
+            - **Linux ARM64**: `flowt-${{ inputs.version }}-linux-arm64`
+            - **Windows x64**: `flowt-${{ inputs.version }}-windows-x64.exe`
+            
+            ### 安装说明
+            
+            1. 下载对应平台的二进制文件
+            2. 重命名为 `flowt` (Windows 下为 `flowt.exe`)
+            3. 添加执行权限: `chmod +x flowt` (Unix 系统)
+            4. 移动到 PATH 目录或直接运行
+            
+            ### 配置
+            
+            创建配置文件 `~/.config/flowt.yml`:
+            
+            ```yaml
+            organization_id: "your_organization_id"
+            personal_access_token: "your_personal_access_token"
+            endpoint: "openapi-rdc.aliyuncs.com"
+            ```
+            
+            ### 校验文件完整性
+            
+            使用 `checksums.txt` 文件验证下载的二进制文件:
+            
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+            
+            ---
+            
+            **完整文档**: [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
+          files: |
+            release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-summary:
+    name: Build Summary
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Build Summary
+        run: |
+          echo "## 🚀 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Built Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Architecture | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS | Intel x64 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS | Apple Silicon (ARM64) | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux | x64 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux | ARM64 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows | x64 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 Download Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "构建完成的二进制文件可以在 Actions 页面的 Artifacts 部分下载。" >> $GITHUB_STEP_SUMMARY 

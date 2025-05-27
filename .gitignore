@@ -49,3 +49,8 @@ go.work
 /logs/
 
 /test_pipeline_groups*
+
+# Build artifacts
+/dist/
+/release/
+checksums.txt
