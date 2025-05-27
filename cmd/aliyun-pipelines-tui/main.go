@@ -31,7 +31,7 @@ type Config struct {
 	Bookmarks []string `yaml:"bookmarks,omitempty"`
 }
 
-// loadConfig loads configuration from ~/.config/flowt.yml
+// loadConfig loads configuration from ~/.flowt/config.yml
 func loadConfig() (*Config, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -60,7 +60,7 @@ func loadConfig() (*Config, error) {
 	return &config, nil
 }
 
-// saveConfig saves configuration to ~/.config/flowt.yml
+// saveConfig saves configuration to ~/.flowt/config.yml
 func saveConfig(config *Config) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -196,7 +196,7 @@ func main() {
 	config, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
-		fmt.Fprintln(os.Stderr, "\nPlease create a configuration file at ~/.config/flowt.yml with the following format:")
+		fmt.Fprintln(os.Stderr, "\nPlease create a configuration file at ~/.flowt/config.yml with the following format:")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "# 企业 ID（组织 ID）- 必填")
 		fmt.Fprintln(os.Stderr, "organization_id: your_organization_id")

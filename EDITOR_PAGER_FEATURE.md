@@ -30,7 +30,7 @@ flowt 现在支持在日志显示界面通过按键 `e` 和 `v` 使用配置的�
 
 ### 在配置文件中设置
 
-在 `~/.config/flowt.yml` 中添加 `editor` 和 `pager` 字段：
+在 `~/.flowt/config.yml` 中添加 `editor` 和 `pager` 字段：
 
 ```yaml
 # 企业 ID（组织 ID）- 必填

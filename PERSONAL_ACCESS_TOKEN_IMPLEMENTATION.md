@@ -8,7 +8,7 @@ This document describes the implementation of personal access token authenticati
 
 ### 1. Configuration Support
 
-The application now supports personal access token authentication through the configuration file `~/.config/flowt.yml`:
+The application now supports personal access token authentication through the configuration file `~/.flowt/config.yml`:
 
 ```yaml
 # Recommended authentication method
@@ -98,7 +98,7 @@ func (c *Client) makeTokenRequest(method, path string, body interface{}) (map[st
 ### Configuration Example
 
 ```yaml
-# ~/.config/flowt.yml
+# ~/.flowt/config.yml
 organization_id: "12345678"
 personal_access_token: "your_actual_token_here"
 endpoint: "openapi-rdc.aliyuncs.com"
@@ -119,7 +119,7 @@ go build -o flowt ./cmd/aliyun-pipelines-tui
 The application maintains backward compatibility with AccessKey authentication:
 
 ```yaml
-# ~/.config/flowt.yml (fallback method)
+# ~/.flowt/config.yml (fallback method)
 organization_id: "12345678"
 access_key_id: "your_access_key_id"
 access_key_secret: "your_access_key_secret"
