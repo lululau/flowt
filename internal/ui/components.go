@@ -660,20 +660,7 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 		return
 	}
 
-	// Fetch run details first to check status
-	runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
-	if err != nil {
-		app.QueueUpdateDraw(func() {
-			currentText := logViewTextView.GetText(false)
-			if !strings.Contains(currentText, "Error getting run details") {
-				fmt.Fprintf(logViewTextView, "\nError getting run details: %v\n", err)
-				logViewTextView.ScrollToEnd()
-			}
-		})
-		return
-	}
-
-	// Fetch complete logs
+	// Fetch complete logs (this will internally get run details as well)
 	logs, err := apiClient.GetPipelineRunLogs(orgId, currentPipelineIDForRun, currentRunID)
 
 	app.QueueUpdateDraw(func() {
@@ -686,14 +673,6 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 		logText.WriteString(fmt.Sprintf("Branch: %s\n", branchInfo))
 		if repoInfo != "" {
 			logText.WriteString(fmt.Sprintf("Repository: %s\n", repoInfo))
-		}
-		logText.WriteString(fmt.Sprintf("Status: %s\n", runDetails.Status))
-		logText.WriteString(fmt.Sprintf("Trigger: %s\n", runDetails.TriggerMode))
-		if !runDetails.StartTime.IsZero() {
-			logText.WriteString(fmt.Sprintf("Start Time: %s\n", runDetails.StartTime.Format("2006-01-02 15:04:05")))
-		}
-		if !runDetails.FinishTime.IsZero() {
-			logText.WriteString(fmt.Sprintf("Finish Time: %s\n", runDetails.FinishTime.Format("2006-01-02 15:04:05")))
 		}
 
 		// Add refresh timestamp
@@ -714,9 +693,11 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 		logText.WriteString("\n" + strings.Repeat("=", 80) + "\n")
 		logText.WriteString("Auto-refreshing every 5 seconds. Press 'q' to return, 'e' to edit in editor, 'v' to view in pager.\n")
 
-		// Check if pipeline is finished
-		if runDetails.Status == "SUCCESS" || runDetails.Status == "FAILED" || runDetails.Status == "CANCELED" {
-			logText.WriteString(fmt.Sprintf("Pipeline finished with status: %s\n", runDetails.Status))
+		// Extract status from logs to determine if we should stop auto-refresh
+		// The logs already contain status information from GetPipelineRunLogs
+		if logs != "" && (strings.Contains(logs, "Status: SUCCESS") ||
+			strings.Contains(logs, "Status: FAILED") ||
+			strings.Contains(logs, "Status: CANCELED")) {
 			// Stop auto-refresh for finished pipelines
 			stopLogAutoRefresh()
 		}
@@ -1316,18 +1297,13 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 							app.SetFocus(logViewTextView)
 						})
 
-						// For historical runs, we don't have the pipeline name and branch info readily available
-						// So we'll fetch the run details first to get basic info
-						runDetails, err := apiClient.GetPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
-						var pipelineName, branchInfo, repoInfo string
-						if err == nil {
-							pipelineName = currentPipelineName // Use the stored pipeline name
-							branchInfo = "N/A"                 // Historical runs don't have branch info readily available
-							repoInfo = ""
-						}
+						// Use the run data we already have from the table to avoid duplicate API calls
+						pipelineName := currentPipelineName
+						branchInfo := "N/A" // Historical runs don't have branch info readily available
+						repoInfo := ""
 
 						// Start auto-refresh for this historical run (but only refresh once for completed runs)
-						if runDetails != nil && (runDetails.Status == "RUNNING" || runDetails.Status == "QUEUED") {
+						if selectedRun.Status == "RUNNING" || selectedRun.Status == "QUEUED" {
 							// Only auto-refresh for running pipelines
 							startLogAutoRefresh(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
 						} else {
