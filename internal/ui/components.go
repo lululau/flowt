@@ -569,9 +569,11 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 			if repoInfo != "" {
 				logText += fmt.Sprintf("Repository: %s\n", repoInfo)
 			}
-			logViewTextView.SetText(logText)
-			mainPagesGlobal.SwitchToPage("logs")
-			app.SetFocus(logViewTextView)
+			if logViewTextView != nil {
+				logViewTextView.SetText(logText)
+				mainPagesGlobal.SwitchToPage("logs")
+				app.SetFocus(logViewTextView)
+			}
 		})
 
 		runResponse, err := apiClient.RunPipeline(orgId, selectedPipeline.PipelineID, params)
@@ -591,8 +593,10 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 				logText += fmt.Sprintf("Repository: %s\n", repoInfo)
 			}
 			logText += "Fetching run details...\n"
-			logViewTextView.SetText(logText)
-			logViewTextView.ScrollToEnd()
+			if logViewTextView != nil {
+				logViewTextView.SetText(logText)
+				logViewTextView.ScrollToEnd()
+			}
 		})
 
 		// Start automatic log fetching and refreshing every 5 seconds
@@ -617,21 +621,42 @@ func startLogAutoRefresh(app *tview.Application, apiClient *api.Client, orgId, p
 
 	// Start the refresh goroutine
 	go func() {
+		// Capture the channels locally to avoid race conditions
+		ticker := logRefreshTicker
+		stopChan := logRefreshStop
+
+		// Defer cleanup to ensure resources are properly released
+		defer func() {
+			if ticker != nil {
+				ticker.Stop()
+			}
+			// Close the stop channel if it's still open
+			if stopChan != nil {
+				// Check if channel is still open before closing
+				select {
+				case <-stopChan:
+					// Channel already received a value, safe to close
+				default:
+					// Channel is empty, close it
+					close(stopChan)
+				}
+			}
+		}()
+
 		// Initial log fetch
 		fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
 
 		for {
 			select {
-			case <-logRefreshTicker.C:
+			case <-ticker.C:
 				// Only refresh if log view is still active
 				if isLogViewActive {
 					fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
 				} else {
 					// Stop refreshing if log view is no longer active
-					stopLogAutoRefresh()
 					return
 				}
-			case <-logRefreshStop:
+			case <-stopChan:
 				return
 			}
 		}
@@ -640,16 +665,22 @@ func startLogAutoRefresh(app *tview.Application, apiClient *api.Client, orgId, p
 
 // stopLogAutoRefresh stops the automatic log refresh
 func stopLogAutoRefresh() {
+	// Stop ticker first
 	if logRefreshTicker != nil {
 		logRefreshTicker.Stop()
 		logRefreshTicker = nil
 	}
+
+	// Send stop signal to goroutine if channel exists
 	if logRefreshStop != nil {
+		// Send stop signal in a non-blocking way
 		select {
 		case logRefreshStop <- true:
+			// Signal sent successfully
 		default:
+			// Channel might be full or closed, that's ok
 		}
-		close(logRefreshStop)
+		// Set to nil to prevent further access
 		logRefreshStop = nil
 	}
 }
@@ -660,10 +691,26 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 		return
 	}
 
+	// Check if app is still valid
+	if app == nil {
+		return
+	}
+
 	// Fetch complete logs (this will internally get run details as well)
 	logs, err := apiClient.GetPipelineRunLogs(orgId, currentPipelineIDForRun, currentRunID)
 
+	// Use a safe update mechanism
 	app.QueueUpdateDraw(func() {
+		// Double-check that we're still in log view mode
+		if !isLogViewActive {
+			return
+		}
+
+		// Check if logViewTextView is still valid before updating
+		if logViewTextView == nil {
+			return
+		}
+
 		// Build the complete log display
 		var logText strings.Builder
 
@@ -702,8 +749,11 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 			stopLogAutoRefresh()
 		}
 
-		logViewTextView.SetText(logText.String())
-		logViewTextView.ScrollToEnd()
+		// Final check before updating UI
+		if logViewTextView != nil {
+			logViewTextView.SetText(logText.String())
+			logViewTextView.ScrollToEnd()
+		}
 	})
 }
 
@@ -1292,9 +1342,11 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 					// Switch to log view and start auto-refresh for historical runs
 					go func() {
 						app.QueueUpdateDraw(func() {
-							logViewTextView.SetText(fmt.Sprintf("Fetching logs for run %s...", currentRunID))
-							mainPages.SwitchToPage("logs")
-							app.SetFocus(logViewTextView)
+							if logViewTextView != nil {
+								logViewTextView.SetText(fmt.Sprintf("Fetching logs for run %s...", currentRunID))
+								mainPages.SwitchToPage("logs")
+								app.SetFocus(logViewTextView)
+							}
 						})
 
 						// Use the run data we already have from the table to avoid duplicate API calls
@@ -1328,21 +1380,25 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		switch event.Rune() {
 		case 'e':
 			// Open logs in editor
-			logContent := logViewTextView.GetText(false)
-			if logContent != "" {
-				err := OpenInEditor(logContent, app)
-				if err != nil {
-					ShowModal("Error", fmt.Sprintf("Failed to open editor: %v", err), []string{"OK"}, nil)
+			if logViewTextView != nil {
+				logContent := logViewTextView.GetText(false)
+				if logContent != "" {
+					err := OpenInEditor(logContent, app)
+					if err != nil {
+						ShowModal("Error", fmt.Sprintf("Failed to open editor: %v", err), []string{"OK"}, nil)
+					}
 				}
 			}
 			return nil
 		case 'v':
 			// Open logs in pager
-			logContent := logViewTextView.GetText(false)
-			if logContent != "" {
-				err := OpenInPager(logContent, app)
-				if err != nil {
-					ShowModal("Error", fmt.Sprintf("Failed to open pager: %v", err), []string{"OK"}, nil)
+			if logViewTextView != nil {
+				logContent := logViewTextView.GetText(false)
+				if logContent != "" {
+					err := OpenInPager(logContent, app)
+					if err != nil {
+						ShowModal("Error", fmt.Sprintf("Failed to open pager: %v", err), []string{"OK"}, nil)
+					}
 				}
 			}
 			return nil

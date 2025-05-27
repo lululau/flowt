@@ -1500,14 +1500,24 @@ func (c *Client) GetPipelineRunLogs(organizationId string, pipelineIdStr string,
 
 			if hasVMDeployAction {
 				// This is a VM deployment job, use VM deployment APIs
-				deployOrderId, err := extractDeployOrderId(job.Result)
+				deployOrderId, err := extractDeployOrderIdFromActions(job.Actions)
 				if err != nil {
-					allLogs.WriteString(fmt.Sprintf("Error extracting deployOrderId from job result: %v\n", err))
+					allLogs.WriteString(fmt.Sprintf("Error extracting deployOrderId from job actions: %v\n", err))
+					// For running deployments, the deployOrderId might not be available yet
+					if job.Status == "RUNNING" || job.Status == "QUEUED" {
+						allLogs.WriteString("Deployment is still in progress. Deploy order information will be available once the deployment starts.\n")
+					} else if job.Status == "FAILED" {
+						allLogs.WriteString("Deployment job failed. No deploy order information available.\n")
+					} else {
+						allLogs.WriteString("Deploy order information is not available for this job.\n")
+					}
+					// Continue processing other jobs instead of stopping
 				} else {
 					// Get VM deployment order details
 					deployOrder, err := c.GetVMDeployOrder(organizationId, pipelineIdStr, deployOrderId)
 					if err != nil {
 						allLogs.WriteString(fmt.Sprintf("Error fetching VM deploy order %s: %v\n", deployOrderId, err))
+						allLogs.WriteString("Unable to retrieve deployment details at this time.\n")
 					} else {
 						allLogs.WriteString(fmt.Sprintf("[yellow]Deploy Order ID: %d[-]\n", deployOrder.DeployOrderId))
 						allLogs.WriteString(fmt.Sprintf("[yellow]Deploy Status: %s[-]\n", deployOrder.Status))
@@ -1606,6 +1616,11 @@ func extractDeployOrderId(resultJSON string) (string, error) {
 		return "", fmt.Errorf("failed to unmarshal result JSON: %w", err)
 	}
 
+	// Add debug logging if enabled
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("Parsing job result JSON for deployOrderId: %.200s", resultJSON)
+	}
+
 	// Navigate through the nested structure: result.data.deployOrderId.id
 	if data, ok := result["data"].(map[string]interface{}); ok {
 		if deployOrderIdData, ok := data["deployOrderId"].(map[string]interface{}); ok {
@@ -1615,10 +1630,97 @@ func extractDeployOrderId(resultJSON string) (string, error) {
 			if id, ok := deployOrderIdData["id"].(string); ok {
 				return id, nil
 			}
+		} else {
+			// Check if deployOrderId is directly under data as a number or string
+			if id, ok := data["deployOrderId"].(float64); ok {
+				return fmt.Sprintf("%.0f", id), nil
+			}
+			if id, ok := data["deployOrderId"].(string); ok {
+				return id, nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("deployOrderId not found in result JSON")
+	// Try alternative structure: result.deployOrderId
+	if id, ok := result["deployOrderId"].(float64); ok {
+		return fmt.Sprintf("%.0f", id), nil
+	}
+	if id, ok := result["deployOrderId"].(string); ok {
+		return id, nil
+	}
+
+	// Try alternative structure: result.deployOrderId.id
+	if deployOrderIdData, ok := result["deployOrderId"].(map[string]interface{}); ok {
+		if id, ok := deployOrderIdData["id"].(float64); ok {
+			return fmt.Sprintf("%.0f", id), nil
+		}
+		if id, ok := deployOrderIdData["id"].(string); ok {
+			return id, nil
+		}
+	}
+
+	return "", fmt.Errorf("deployOrderId not found in result JSON. Available keys: %v", getMapKeys(result))
+}
+
+// extractDeployOrderIdFromActions extracts deployOrderId from job actions array
+// Based on the API response structure where deployOrderId is in actions[].data or actions[].params
+func extractDeployOrderIdFromActions(actions []JobAction) (string, error) {
+	if len(actions) == 0 {
+		return "", fmt.Errorf("no actions found in job")
+	}
+
+	// Add debug logging if enabled
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("Parsing job actions for deployOrderId, found %d actions", len(actions))
+	}
+
+	// Look for GetVMDeployOrder action
+	for _, action := range actions {
+		if action.Type == "GetVMDeployOrder" {
+			// First try to get deployOrderId from action.params
+			if action.Params != nil {
+				if deployOrderId, ok := action.Params["deployOrderId"]; ok {
+					if id, ok := deployOrderId.(float64); ok {
+						return fmt.Sprintf("%.0f", id), nil
+					}
+					if id, ok := deployOrderId.(string); ok {
+						return id, nil
+					}
+				}
+			}
+
+			// Then try to parse from action.data JSON string
+			if action.Data != "" {
+				var actionData map[string]interface{}
+				if err := json.Unmarshal([]byte(action.Data), &actionData); err != nil {
+					if os.Getenv("FLOWT_DEBUG") == "1" {
+						debugLogger.Printf("Failed to unmarshal action data: %v, data: %.200s", err, action.Data)
+					}
+					continue
+				}
+
+				// Look for deployOrderId in the parsed data
+				if deployOrderId, ok := actionData["deployOrderId"]; ok {
+					if id, ok := deployOrderId.(float64); ok {
+						return fmt.Sprintf("%.0f", id), nil
+					}
+					if id, ok := deployOrderId.(string); ok {
+						return id, nil
+					}
+				}
+
+				if os.Getenv("FLOWT_DEBUG") == "1" {
+					debugLogger.Printf("Action data keys: %v", getMapKeys(actionData))
+				}
+			}
+
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Found GetVMDeployOrder action but no deployOrderId found in params or data")
+			}
+		}
+	}
+
+	return "", fmt.Errorf("deployOrderId not found in any GetVMDeployOrder action")
 }
 
 // ListPipelineRuns retrieves a list of runs for a specific pipeline.
