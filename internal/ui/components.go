@@ -269,13 +269,15 @@ func formatTime(t time.Time) string {
 func getStatusColor(status string) tcell.Color {
 	switch strings.ToUpper(status) {
 	case "SUCCESS":
-		return tcell.ColorGreen
+		return tcell.ColorWhite
 	case "RUNNING":
-		return tcell.ColorYellow
+		return tcell.ColorGreen
+	case "FAIL":
+		return tcell.ColorRed
 	case "FAILED":
 		return tcell.ColorRed
 	case "CANCELED":
-		return tcell.ColorOrange
+		return tcell.ColorGray
 	default:
 		return tcell.ColorWhite
 	}
@@ -1042,7 +1044,7 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 		globalRunIndex := startIdx + i
 		runNumCell := tview.NewTableCell(fmt.Sprintf("#%d", totalRuns-globalRunIndex)).
 			SetTextColor(tcell.ColorLightBlue).
-			SetAlign(tview.AlignCenter).
+			SetAlign(tview.AlignLeft).
 			SetBackgroundColor(tcell.ColorDefault).
 			SetExpansion(1) // Minimal width
 		table.SetCell(row, 0, runNumCell)
@@ -1050,7 +1052,7 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 		// Status - make it more compact
 		statusCell := tview.NewTableCell(runCopy.Status).
 			SetTextColor(getStatusColor(runCopy.Status)).
-			SetAlign(tview.AlignCenter).
+			SetAlign(tview.AlignLeft).
 			SetBackgroundColor(tcell.ColorDefault).
 			SetExpansion(2) // Small width
 		table.SetCell(row, 1, statusCell)
@@ -1102,7 +1104,7 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 		}
 		durationCell := tview.NewTableCell(duration).
 			SetTextColor(tcell.ColorGray).
-			SetAlign(tview.AlignRight).
+			SetAlign(tview.AlignLeft).
 			SetBackgroundColor(tcell.ColorDefault).
 			SetExpansion(1) // Minimal width
 		table.SetCell(row, 5, durationCell)
