@@ -1042,7 +1042,7 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 
 		// Run number (reverse order, latest first) - adjust for pagination
 		globalRunIndex := startIdx + i
-		runNumCell := tview.NewTableCell(fmt.Sprintf("#%d", totalRuns-globalRunIndex)).
+		runNumCell := tview.NewTableCell(fmt.Sprintf("%d", totalRuns-globalRunIndex)).
 			SetTextColor(tcell.ColorLightBlue).
 			SetAlign(tview.AlignLeft).
 			SetBackgroundColor(tcell.ColorDefault).
