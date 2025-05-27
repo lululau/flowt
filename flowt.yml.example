@@ -28,8 +28,24 @@ endpoint: "openapi-rdc.aliyuncs.com"
 # 支持的区域: cn-hangzhou, cn-beijing, cn-shanghai, cn-shenzhen 等
 # region_id: "cn-hangzhou"
 
+# ===== 编辑器和分页器配置 =====
+# 在日志视图中按 'e' 键使用编辑器打开日志，按 'v' 键使用分页器查看日志
+
+# 编辑器命令 - 可选，支持带参数的命令
+# 优先级：配置文件 → VISUAL环境变量 → EDITOR环境变量 → vim
+# editor: "vim"
+# editor: "code --wait"
+# editor: "nano"
+
+# 分页器命令 - 可选，支持带参数的命令  
+# 优先级：配置文件 → PAGER环境变量 → less
+# pager: "less"
+# pager: "less -R"
+# pager: "more"
+
 # 注意事项：
 # 1. 请妥善保管您的访问凭证，不要将其提交到公共代码仓库
 # 2. 建议定期轮换访问凭证以提高安全性
 # 3. 确保访问凭证具有云效 DevOps 相关的权限
-# 4. 个人访问令牌相比AccessKey更安全，建议优先使用 
+# 4. 个人访问令牌相比AccessKey更安全，建议优先使用
+# 5. 编辑器和分页器命令需要确保在系统PATH中可用 

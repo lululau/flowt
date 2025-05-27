@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,6 +34,120 @@ func fuzzyMatch(query, text string) bool {
 	return queryIndex == len(query)
 }
 
+// SetGlobalConfig sets the global editor and pager commands
+func SetGlobalConfig(editorCmd, pagerCmd string) {
+	globalEditorCmd = editorCmd
+	globalPagerCmd = pagerCmd
+}
+
+// OpenInEditor opens the given text content in the configured editor
+func OpenInEditor(content string, app *tview.Application) error {
+	if globalEditorCmd == "" {
+		return fmt.Errorf("no editor configured")
+	}
+
+	// Create a temporary file
+	tmpDir := os.TempDir()
+	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("flowt_logs_%d.txt", time.Now().Unix()))
+
+	err := os.WriteFile(tmpFile, []byte(content), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write temporary file: %w", err)
+	}
+
+	// Use app.Suspend with proper terminal restoration
+	var cmdErr error
+	app.Suspend(func() {
+		// Parse editor command (might have arguments)
+		cmdParts := strings.Fields(globalEditorCmd)
+		if len(cmdParts) == 0 {
+			cmdErr = fmt.Errorf("invalid editor command")
+			return
+		}
+
+		// Add the temporary file as the last argument
+		cmdParts = append(cmdParts, tmpFile)
+
+		// Open in editor with proper terminal handling
+		cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		// Run editor and wait for it to complete
+		cmdErr = cmd.Run()
+
+		// Reset terminal after editor exits
+		resetCmd := exec.Command("reset")
+		resetCmd.Stdout = os.Stdout
+		resetCmd.Stderr = os.Stderr
+		resetCmd.Run()
+	})
+
+	// Clean up temp file after editor closes
+	os.Remove(tmpFile)
+
+	if cmdErr != nil {
+		return fmt.Errorf("editor command failed: %w", cmdErr)
+	}
+
+	return nil
+}
+
+// OpenInPager opens the given text content in the configured pager
+func OpenInPager(content string, app *tview.Application) error {
+	if globalPagerCmd == "" {
+		return fmt.Errorf("no pager configured")
+	}
+
+	// Create a temporary file
+	tmpDir := os.TempDir()
+	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("flowt_logs_%d.txt", time.Now().Unix()))
+
+	err := os.WriteFile(tmpFile, []byte(content), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write temporary file: %w", err)
+	}
+
+	// Use app.Suspend with proper terminal restoration
+	var cmdErr error
+	app.Suspend(func() {
+		// Parse pager command (might have arguments)
+		cmdParts := strings.Fields(globalPagerCmd)
+		if len(cmdParts) == 0 {
+			cmdErr = fmt.Errorf("invalid pager command")
+			return
+		}
+
+		// Add the temporary file as the last argument
+		cmdParts = append(cmdParts, tmpFile)
+
+		// Open in pager with proper terminal handling
+		cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		// Run pager and wait for it to complete
+		cmdErr = cmd.Run()
+
+		// Reset terminal after pager exits
+		resetCmd := exec.Command("reset")
+		resetCmd.Stdout = os.Stdout
+		resetCmd.Stderr = os.Stderr
+		resetCmd.Run()
+	})
+
+	// Clean up temp file after pager closes
+	os.Remove(tmpFile)
+
+	if cmdErr != nil {
+		return fmt.Errorf("pager command failed: %w", cmdErr)
+	}
+
+	return nil
+}
+
 var (
 	allPipelines      []api.Pipeline
 	allPipelineGroups []api.PipelineGroup
@@ -41,6 +157,10 @@ var (
 
 	currentSearchQuery      string
 	currentGroupSearchQuery string // New: search query for groups
+
+	// Global configuration for editor and pager
+	globalEditorCmd string
+	globalPagerCmd  string
 
 	// Maps to store references for table rows
 	pipelineRowMap = make(map[int]*api.Pipeline)
@@ -592,7 +712,7 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 
 		// Add footer with instructions
 		logText.WriteString("\n" + strings.Repeat("=", 80) + "\n")
-		logText.WriteString("Auto-refreshing every 5 seconds. Press 'q' to return to pipeline list.\n")
+		logText.WriteString("Auto-refreshing every 5 seconds. Press 'q' to return, 'e' to edit in editor, 'v' to view in pager.\n")
 
 		// Check if pipeline is finished
 		if runDetails.Status == "SUCCESS" || runDetails.Status == "FAILED" || runDetails.Status == "CANCELED" {
@@ -1229,7 +1349,44 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// --- Event Handlers for logViewTextView ---
 	logViewTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' || event.Rune() == 'q' {
+		switch event.Rune() {
+		case 'e':
+			// Open logs in editor
+			logContent := logViewTextView.GetText(false)
+			if logContent != "" {
+				err := OpenInEditor(logContent, app)
+				if err != nil {
+					ShowModal("Error", fmt.Sprintf("Failed to open editor: %v", err), []string{"OK"}, nil)
+				}
+			}
+			return nil
+		case 'v':
+			// Open logs in pager
+			logContent := logViewTextView.GetText(false)
+			if logContent != "" {
+				err := OpenInPager(logContent, app)
+				if err != nil {
+					ShowModal("Error", fmt.Sprintf("Failed to open pager: %v", err), []string{"OK"}, nil)
+				}
+			}
+			return nil
+		case 'b', 'q':
+			isLogViewActive = false
+			// Stop auto-refresh when leaving log view
+			stopLogAutoRefresh()
+			if isRunHistoryActive {
+				// Return to run history if we came from there
+				mainPages.SwitchToPage("run_history")
+				app.SetFocus(runHistoryTable)
+			} else {
+				// Return to pipelines
+				mainPages.SwitchToPage("pipelines")
+				app.SetFocus(pipelineTable)
+			}
+			return nil
+		}
+
+		if event.Key() == tcell.KeyEscape {
 			isLogViewActive = false
 			// Stop auto-refresh when leaving log view
 			stopLogAutoRefresh()

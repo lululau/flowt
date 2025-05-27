@@ -24,6 +24,9 @@ type Config struct {
 	AccessKeyID     string `yaml:"access_key_id"`
 	AccessKeySecret string `yaml:"access_key_secret"`
 	RegionID        string `yaml:"region_id"`
+	// 编辑器和分页器配置
+	Editor string `yaml:"editor,omitempty"`
+	Pager  string `yaml:"pager,omitempty"`
 }
 
 // loadConfig loads configuration from ~/.config/flowt.yml
@@ -70,6 +73,50 @@ func validateConfig(config *Config) error {
 	}
 
 	return nil
+}
+
+// GetEditor returns the editor command to use, following the priority:
+// 1. Config file "editor" field
+// 2. VISUAL environment variable
+// 3. EDITOR environment variable
+// 4. Default to "vim"
+func GetEditor(config *Config) string {
+	// First check config file
+	if config.Editor != "" {
+		return config.Editor
+	}
+
+	// Then check VISUAL environment variable
+	if visual := os.Getenv("VISUAL"); visual != "" {
+		return visual
+	}
+
+	// Then check EDITOR environment variable
+	if editor := os.Getenv("EDITOR"); editor != "" {
+		return editor
+	}
+
+	// Default to vim
+	return "vim"
+}
+
+// GetPager returns the pager command to use, following the priority:
+// 1. Config file "pager" field
+// 2. PAGER environment variable
+// 3. Default to "less"
+func GetPager(config *Config) string {
+	// First check config file
+	if config.Pager != "" {
+		return config.Pager
+	}
+
+	// Then check PAGER environment variable
+	if pager := os.Getenv("PAGER"); pager != "" {
+		return pager
+	}
+
+	// Default to less
+	return "less"
 }
 
 func main() {
@@ -133,6 +180,9 @@ func main() {
 
 	// Initialize tview.Application
 	app := tview.NewApplication()
+
+	// Set global config for UI components
+	ui.SetGlobalConfig(GetEditor(config), GetPager(config))
 
 	// Create the main view (Pages) using ui.NewMainView()
 	mainPages := ui.NewMainView(app, apiClient, config.OrganizationID) // Pass apiClient and orgId
