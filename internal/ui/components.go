@@ -1150,17 +1150,10 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	searchInput := tview.NewInputField().
 		SetLabel("Search: ").
-		SetPlaceholder("Pipeline name/ID (/ to focus)...").
+		SetPlaceholder("Pipeline Name (Press / to focus)...").
 		SetFieldWidth(0)
-	searchInput.SetBackgroundColor(tcell.ColorDefault)      // Overall background of the box
 	searchInput.SetFieldBackgroundColor(tcell.ColorDefault) // Background of the text entry area
-	searchInput.SetLabelColor(tcell.ColorWhite)             // Color of the "Search: " label
-	searchInput.SetFieldTextColor(tcell.ColorWhite)         // Color of the text as you type
-	searchInput.SetPlaceholderTextColor(tcell.ColorGray)    // Color of the placeholder text
-
-	// Explicitly set the style for the field itself
-	fieldStyle := tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorWhite)
-	searchInput.SetFieldStyle(fieldStyle)
+	searchInput.SetPlaceholderStyle(tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorGray))
 
 	// Help info
 	helpInfo := tview.NewTextView().
@@ -1185,17 +1178,14 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	// Group search input
 	groupSearchInput := tview.NewInputField().
 		SetLabel("Search: ").
-		SetPlaceholder("Group name/ID (/ to focus)...").
+		SetPlaceholder("Group Name (Press / to focus)...").
 		SetFieldWidth(0)
-	groupSearchInput.SetBackgroundColor(tcell.ColorDefault)      // Overall background of the box
 	groupSearchInput.SetFieldBackgroundColor(tcell.ColorDefault) // Background of the text entry area
-	groupSearchInput.SetLabelColor(tcell.ColorWhite)             // Color of the "Search: " label
-	groupSearchInput.SetFieldTextColor(tcell.ColorWhite)         // Color of the text as you type
-	groupSearchInput.SetPlaceholderTextColor(tcell.ColorGray)    // Color of the placeholder text
+	groupSearchInput.SetPlaceholderStyle(tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorGray))
 	groupSearchInputGlobal = groupSearchInput
 
 	// Explicitly set the style for the field itself
-	groupSearchInput.SetFieldStyle(tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorWhite))
+	// groupSearchInput.SetFieldStyle(tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorWhite))
 
 	// Group help info
 	groupHelpInfo := tview.NewTextView().
