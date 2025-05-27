@@ -170,9 +170,11 @@ var (
 	currentRunID            string
 	currentPipelineIDForRun string
 	currentPipelineName     string
+	currentRunStatus        string // Current run status for status bar
 	isLogViewActive         bool
 	isRunHistoryActive      bool
 	logViewTextView         *tview.TextView
+	logStatusBar            *tview.TextView    // Status bar for log view
 	logPage                 *tview.Flex        // Flex layout for the log page
 	runHistoryTable         *tview.Table       // Table for pipeline run history
 	runHistoryPage          *tview.Flex        // Flex layout for the run history page
@@ -257,6 +259,50 @@ func getStatusColor(status string) tcell.Color {
 	default:
 		return tcell.ColorWhite
 	}
+}
+
+// updateLogStatusBar updates the status bar in the log view
+func updateLogStatusBar() {
+	if logStatusBar == nil {
+		return
+	}
+
+	var statusText string
+	var statusColor tcell.Color
+
+	switch strings.ToUpper(currentRunStatus) {
+	case "RUNNING":
+		statusText = fmt.Sprintf("Status: [green]%s[-] | Auto-refresh: ON", currentRunStatus)
+		statusColor = tcell.ColorDefault
+	case "SUCCESS":
+		statusText = fmt.Sprintf("Status: [white]%s[-] | Auto-refresh: %s", currentRunStatus, getAutoRefreshStatus())
+		statusColor = tcell.ColorDefault
+	case "FAILED":
+		statusText = fmt.Sprintf("Status: [red]%s[-] | Auto-refresh: %s", currentRunStatus, getAutoRefreshStatus())
+		statusColor = tcell.ColorDefault
+	case "CANCELED":
+		statusText = fmt.Sprintf("Status: [gray]%s[-] | Auto-refresh: %s", currentRunStatus, getAutoRefreshStatus())
+		statusColor = tcell.ColorDefault
+	default:
+		statusText = fmt.Sprintf("Status: [white]%s[-] | Auto-refresh: ON", currentRunStatus)
+		statusColor = tcell.ColorDefault
+	}
+
+	logStatusBar.SetText(statusText)
+	logStatusBar.SetTextColor(statusColor)
+}
+
+// getAutoRefreshStatus returns the current auto-refresh status text
+func getAutoRefreshStatus() string {
+	if pipelineFinished {
+		remaining := 3 - finishedRefreshCount
+		if remaining > 0 {
+			return fmt.Sprintf("ON (%d more)", remaining)
+		} else {
+			return "OFF"
+		}
+	}
+	return "ON"
 }
 
 // updatePipelineTable filters and updates the pipeline table widget.
@@ -584,6 +630,7 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 			return
 		}
 		currentRunID = runResponse.RunID
+		currentRunStatus = "RUNNING" // New runs start as RUNNING
 		isLogViewActive = true
 
 		app.QueueUpdateDraw(func() {
@@ -597,6 +644,8 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 				logViewTextView.SetText(logText)
 				logViewTextView.ScrollToEnd()
 			}
+			// Update status bar for new run
+			updateLogStatusBar()
 		})
 
 		// Start automatic log fetching and refreshing every 5 seconds
@@ -608,12 +657,19 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 var (
 	logRefreshTicker *time.Ticker
 	logRefreshStop   chan bool
+	// Variables for delayed auto-refresh stop
+	finishedRefreshCount int  // Count of refreshes after pipeline finished
+	pipelineFinished     bool // Whether pipeline has finished
 )
 
 // startLogAutoRefresh starts automatic log fetching and refreshing every 5 seconds
 func startLogAutoRefresh(app *tview.Application, apiClient *api.Client, orgId, pipelineName, branchInfo, repoInfo string) {
 	// Stop any existing refresh ticker
 	stopLogAutoRefresh()
+
+	// Reset delayed stop state
+	finishedRefreshCount = 0
+	pipelineFinished = false
 
 	// Create new ticker and stop channel
 	logRefreshTicker = time.NewTicker(5 * time.Second)
@@ -711,6 +767,24 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 			return
 		}
 
+		// Extract status from logs for status tracking
+		var extractedStatus string = "RUNNING" // Default status
+		if logs != "" {
+			if strings.Contains(logs, "Status: SUCCESS") {
+				extractedStatus = "SUCCESS"
+			} else if strings.Contains(logs, "Status: FAILED") {
+				extractedStatus = "FAILED"
+			} else if strings.Contains(logs, "Status: CANCELED") {
+				extractedStatus = "CANCELED"
+			} else if strings.Contains(logs, "Status: RUNNING") {
+				extractedStatus = "RUNNING"
+			}
+		}
+		currentRunStatus = extractedStatus
+
+		// Update status bar
+		updateLogStatusBar()
+
 		// Build the complete log display
 		var logText strings.Builder
 
@@ -738,15 +812,22 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 
 		// Add footer with instructions
 		logText.WriteString("\n" + strings.Repeat("=", 80) + "\n")
-		logText.WriteString("Auto-refreshing every 5 seconds. Press 'q' to return, 'e' to edit in editor, 'v' to view in pager.\n")
+		logText.WriteString("Auto-refreshing every 5 seconds. Press 'r' to refresh manually, 'q' to return, 'e' to edit in editor, 'v' to view in pager.\n")
 
-		// Extract status from logs to determine if we should stop auto-refresh
-		// The logs already contain status information from GetPipelineRunLogs
-		if logs != "" && (strings.Contains(logs, "Status: SUCCESS") ||
-			strings.Contains(logs, "Status: FAILED") ||
-			strings.Contains(logs, "Status: CANCELED")) {
-			// Stop auto-refresh for finished pipelines
-			stopLogAutoRefresh()
+		// Handle delayed auto-refresh stop logic
+		if extractedStatus == "SUCCESS" || extractedStatus == "FAILED" || extractedStatus == "CANCELED" {
+			if !pipelineFinished {
+				// Pipeline just finished
+				pipelineFinished = true
+				finishedRefreshCount = 0
+			} else {
+				// Pipeline was already finished, increment counter
+				finishedRefreshCount++
+				if finishedRefreshCount >= 3 {
+					// Stop auto-refresh after 3 additional refreshes
+					stopLogAutoRefresh()
+				}
+			}
 		}
 
 		// Final check before updating UI
@@ -1023,7 +1104,18 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		SetChangedFunc(func() { app.Draw() }) // Redraw on text change for scrolling
 	logViewTextView.SetBorder(true).SetTitle("Logs").SetBackgroundColor(tcell.ColorDefault)
 
-	logPage = tview.NewFlex().AddItem(logViewTextView, 0, 1, true) // TextView takes all space, is focus target
+	// Status bar for log view
+	logStatusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetText("Status: [white]UNKNOWN[-] | Auto-refresh: ON").
+		SetTextAlign(tview.AlignLeft).
+		SetTextColor(tcell.ColorWhite)
+	logStatusBar.SetBackgroundColor(tcell.ColorDefault)
+
+	// Create log page with status bar
+	logPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(logViewTextView, 0, 1, true). // TextView takes most space, is focus target
+		AddItem(logStatusBar, 1, 1, false)    // Status bar takes 1 line, not focusable
 
 	// Run History View elements
 	runHistoryTable = tview.NewTable().SetBorders(false).SetSelectable(true, false)
@@ -1337,6 +1429,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			if rowCount > 1 && currentRow > 0 {
 				if selectedRun, ok := runHistoryRowMap[currentRow]; ok && selectedRun != nil {
 					currentRunID = selectedRun.RunID
+					currentRunStatus = selectedRun.Status // Initialize status from selected run
 					isLogViewActive = true
 
 					// Switch to log view and start auto-refresh for historical runs
@@ -1344,6 +1437,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 						app.QueueUpdateDraw(func() {
 							if logViewTextView != nil {
 								logViewTextView.SetText(fmt.Sprintf("Fetching logs for run %s...", currentRunID))
+								// Update status bar immediately
+								updateLogStatusBar()
 								mainPages.SwitchToPage("logs")
 								app.SetFocus(logViewTextView)
 							}
@@ -1378,6 +1473,18 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	// --- Event Handlers for logViewTextView ---
 	logViewTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Rune() {
+		case 'r':
+			// Manual refresh
+			go func() {
+				// Get current context for refresh
+				pipelineName := currentPipelineName
+				branchInfo := "N/A"
+				repoInfo := ""
+
+				// Perform manual refresh
+				fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+			}()
+			return nil
 		case 'e':
 			// Open logs in editor
 			if logViewTextView != nil {
