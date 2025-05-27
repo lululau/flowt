@@ -2734,3 +2734,217 @@ func (c *Client) GetVMDeployMachineLog(organizationId, pipelineId, deployOrderId
 
 	return machineLog, nil
 }
+
+// PipelinePageCallback is called for each page of pipelines loaded
+type PipelinePageCallback func(pipelines []Pipeline, currentPage, totalPages int, isComplete bool) error
+
+// ListPipelinesWithCallback loads pipelines page by page and calls the callback for each page
+func (c *Client) ListPipelinesWithCallback(organizationId string, callback PipelinePageCallback) error {
+	return c.listPipelinesWithCallbackAndStatus(organizationId, nil, callback)
+}
+
+// ListPipelinesWithStatusAndCallback loads pipelines with status filter page by page and calls the callback for each page
+func (c *Client) ListPipelinesWithStatusAndCallback(organizationId string, statusList []string, callback PipelinePageCallback) error {
+	return c.listPipelinesWithCallbackAndStatus(organizationId, statusList, callback)
+}
+
+// listPipelinesWithCallbackAndStatus implements the core pagination logic with callback
+func (c *Client) listPipelinesWithCallbackAndStatus(organizationId string, statusList []string, callback PipelinePageCallback) error {
+	if c.useToken {
+		return c.listPipelinesWithTokenAndCallback(organizationId, statusList, callback)
+	}
+
+	// For SDK-based authentication, fall back to loading all at once
+	// This could be enhanced later if needed
+	pipelines, err := c.ListPipelinesWithStatus(organizationId, statusList)
+	if err != nil {
+		return err
+	}
+
+	// Call callback with all pipelines as a single page
+	return callback(pipelines, 1, 1, true)
+}
+
+// listPipelinesWithTokenAndCallback implements token-based pagination with callback
+func (c *Client) listPipelinesWithTokenAndCallback(organizationId string, statusList []string, callback PipelinePageCallback) error {
+	page := 1
+	perPage := 30   // Maximum per page according to API docs
+	totalPages := 1 // Will be updated from response headers
+
+	for {
+		// Build query parameters
+		queryParams := fmt.Sprintf("page=%d&perPage=%d", page, perPage)
+
+		// Add status filtering if provided
+		if len(statusList) > 0 {
+			statusParam := strings.Join(statusList, ",")
+			queryParams += fmt.Sprintf("&statusList=%s", statusParam)
+		}
+
+		path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines?%s", organizationId, queryParams)
+
+		// Make the request and get raw response
+		url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to make request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		if os.Getenv("FLOWT_DEBUG") == "1" {
+			debugLogger.Printf("Request URL: %s", url)
+			debugLogger.Printf("Response Status: %d", resp.StatusCode)
+			debugLogger.Printf("Response Headers: %v", resp.Header)
+			debugLogger.Printf("Response Body (first 1000 chars): %.1000s", string(respBody))
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		// According to API docs, response is a direct array
+		var pipelineItems []map[string]interface{}
+		if err := json.Unmarshal(respBody, &pipelineItems); err != nil {
+			return fmt.Errorf("failed to unmarshal response as array: %w. Response body: %.500s", err, string(respBody))
+		}
+
+		// Update total pages from headers if available
+		if totalPagesHeader := resp.Header.Get("x-total-pages"); totalPagesHeader != "" {
+			if tp, err := strconv.Atoi(totalPagesHeader); err == nil && tp > 0 {
+				totalPages = tp
+			}
+		}
+
+		// If no items found, we've reached the end
+		if len(pipelineItems) == 0 {
+			// Call callback with empty slice to indicate completion
+			return callback([]Pipeline{}, page, totalPages, true)
+		}
+
+		// Parse pipelines for this page
+		var pagePipelines []Pipeline
+		for _, pipelineMap := range pipelineItems {
+			var createTime, updateTime, lastRunTime time.Time
+			if ct, ok := pipelineMap["createTime"].(float64); ok && ct > 0 {
+				createTime = time.Unix(int64(ct)/1000, 0)
+			}
+			if ut, ok := pipelineMap["updateTime"].(float64); ok && ut > 0 {
+				updateTime = time.Unix(int64(ut)/1000, 0)
+			}
+
+			// Extract pipeline ID - it might be string or number
+			var pipelineID string
+			if id, ok := pipelineMap["id"].(string); ok {
+				pipelineID = id
+			} else if id, ok := pipelineMap["id"].(float64); ok {
+				pipelineID = fmt.Sprintf("%.0f", id)
+			} else if id, ok := pipelineMap["pipelineId"].(string); ok {
+				pipelineID = id
+			} else if id, ok := pipelineMap["pipelineId"].(float64); ok {
+				pipelineID = fmt.Sprintf("%.0f", id)
+			}
+
+			// Extract creator information
+			var creator, creatorName string
+			if creatorObj, ok := pipelineMap["creator"].(map[string]interface{}); ok {
+				creator = getStringField(creatorObj, "id")
+				creatorName = getStringField(creatorObj, "username")
+				if creatorName == "" {
+					creatorName = getStringField(creatorObj, "name")
+				}
+				if creatorName == "" {
+					creatorName = getStringField(creatorObj, "displayName")
+				}
+			}
+			if creator == "" {
+				creator = getStringField(pipelineMap, "creatorAccountId")
+			}
+			if creatorName == "" {
+				creatorName = creator // Fallback to ID if name not available
+			}
+
+			// Extract last run information
+			var lastRunStatus string
+			if lastRunObj, ok := pipelineMap["lastRun"].(map[string]interface{}); ok {
+				lastRunStatus = getStringField(lastRunObj, "status")
+				if lrt, ok := lastRunObj["finishTime"].(float64); ok && lrt > 0 {
+					lastRunTime = time.Unix(int64(lrt)/1000, 0)
+				} else if lrt, ok := lastRunObj["startTime"].(float64); ok && lrt > 0 {
+					lastRunTime = time.Unix(int64(lrt)/1000, 0)
+				}
+			}
+			// Try alternative field names for last run status
+			if lastRunStatus == "" {
+				lastRunStatus = getStringField(pipelineMap, "lastRunStatus")
+			}
+			if lastRunStatus == "" {
+				lastRunStatus = getStringField(pipelineMap, "latestRunStatus")
+			}
+
+			pipeline := Pipeline{
+				PipelineID:    pipelineID,
+				Name:          getStringField(pipelineMap, "name"),
+				Status:        getStringField(pipelineMap, "status"),
+				LastRunStatus: lastRunStatus,
+				LastRunTime:   lastRunTime,
+				Creator:       creator,
+				CreatorName:   creatorName,
+				Modifier:      getStringField(pipelineMap, "modifierAccountId"),
+				CreateTime:    createTime,
+				UpdateTime:    updateTime,
+			}
+
+			if pipeline.PipelineID != "" {
+				pagePipelines = append(pagePipelines, pipeline)
+			}
+		}
+
+		// Determine if this is the last page
+		isLastPage := false
+
+		// Check pagination headers
+		totalPagesStr := resp.Header.Get("x-total-pages")
+		currentPageStr := resp.Header.Get("x-page")
+
+		if totalPagesStr != "" && currentPageStr != "" {
+			// Use header information for pagination
+			if currentPageStr == totalPagesStr {
+				isLastPage = true
+			}
+		} else {
+			// Fallback: if we got fewer items than perPage, we've reached the end
+			if len(pipelineItems) < perPage {
+				isLastPage = true
+			}
+		}
+
+		// Call callback with this page's pipelines
+		if err := callback(pagePipelines, page, totalPages, isLastPage); err != nil {
+			return err
+		}
+
+		// Break if this was the last page
+		if isLastPage {
+			break
+		}
+
+		page++
+	}
+
+	return nil
+}
