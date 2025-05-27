@@ -293,7 +293,7 @@ pager: "less -R"
 #### 修改的文件
 - `cmd/aliyun-pipelines-tui/main.go`: 添加配置字段和获取函数
 - `internal/ui/components.go`: 添加按键处理和功能函数
-- `flowt.yml.example`: 更新配置示例
+- `config.yml.example`: 更新配置示例
 
 ## UI 空指针引用崩溃修复 (新增)
 
@@ -407,7 +407,7 @@ pager: "less -R"
 ### 修改的文件
 - `cmd/aliyun-pipelines-tui/main.go`: 扩展配置结构，添加书签管理函数
 - `internal/ui/components.go`: 添加书签功能和增强表格显示
-- `flowt.yml.example`: 更新配置文件示例
+- `config.yml.example`: 更新配置文件示例
 - `BOOKMARK_FEATURE.md`: 详细的功能文档
 
 ### 用户体验改进

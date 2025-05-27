@@ -38,7 +38,7 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to get user home directory: %w", err)
 	}
 
-	configPath := filepath.Join(homeDir, ".config", "flowt.yml")
+	configPath := filepath.Join(homeDir, ".flowt", "config.yml")
 
 	// Check if config file exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -67,7 +67,7 @@ func saveConfig(config *Config) error {
 		return fmt.Errorf("failed to get user home directory: %w", err)
 	}
 
-	configPath := filepath.Join(homeDir, ".config", "flowt.yml")
+	configPath := filepath.Join(homeDir, ".flowt", "config.yml")
 
 	// Ensure config directory exists
 	configDir := filepath.Dir(configPath)

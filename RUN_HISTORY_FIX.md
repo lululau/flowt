@@ -36,7 +36,7 @@ Error fetching runs: all pipeline endpoints failed, Last error: API request fail
 ## 使用方法
 
 ### 1. 配置文件
-确保 `flowt.yml` 配置正确：
+确保 `~/.flowt/config.yml` 配置正确：
 ```yaml
 auth_method: "personal_access_token"
 personal_access_token: "your_token_here"

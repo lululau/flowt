@@ -51,7 +51,7 @@ go build -o flowt ./cmd/aliyun-pipelines-tui
 
 ### 配置文件位置
 
-创建配置文件 `~/.config/flowt.yml`：
+创建配置文件 `~/.flowt/config.yml`：
 
 ```yaml
 # 企业 ID（组织 ID）- 必填
@@ -191,7 +191,7 @@ flowt/
 │   ├── api/                     # API 客户端
 │   └── ui/                      # TUI 界面组件
 ├── logs/                        # 日志文件
-├── flowt.yml.example            # 配置文件示例
+├── config.yml.example            # 配置文件示例
 └── docs/                        # 文档
 ```
 
@@ -221,8 +221,8 @@ tail -f logs/api_debug.log
 ### 常见问题
 
 1. **配置文件未找到**
-   - 确保在 `~/.config/flowt.yml` 创建配置文件
-   - 参考 `flowt.yml.example` 示例
+   - 确保在 `~/.flowt/config.yml` 创建配置文件
+   - 参考 `config.yml.example` 示例
 
 2. **认证失败**
    - 检查个人访问令牌是否有效
