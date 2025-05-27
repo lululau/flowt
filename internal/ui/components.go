@@ -224,6 +224,15 @@ var (
 	allPipelinesCache        []api.Pipeline // Cache for all pipelines (no status filter)
 	allPipelinesCacheLoaded  bool           // Whether the cache has been loaded
 	allPipelinesCacheLoading bool           // Whether cache loading is in progress
+
+	// Progressive loading state for logs
+	isLogLoadingInProgress bool   // Whether log loading is in progress
+	logLoadingCurrentJob   int    // Current job being loaded (1-based)
+	logLoadingTotalJobs    int    // Total number of jobs to load
+	logLoadingComplete     bool   // Whether log loading is complete
+	logLoadingError        error  // Error during log loading
+	originalRunStatus      string // Original status from run history (to prevent overwriting)
+	preserveOriginalStatus bool   // Whether to preserve the original status
 )
 
 // ShowModal displays a modal dialog.
@@ -319,9 +328,19 @@ func updateLogStatusBar() {
 		statusPart = fmt.Sprintf("Status: [white]%s[-]", currentRunStatus)
 	}
 
+	// Build loading progress part (for log loading)
+	var loadingPart string
+	if isLogLoadingInProgress {
+		if logLoadingTotalJobs > 0 {
+			loadingPart = fmt.Sprintf(" | Loading logs: %d/%d jobs", logLoadingCurrentJob, logLoadingTotalJobs)
+		} else {
+			loadingPart = " | Loading logs..."
+		}
+	}
+
 	// Build auto-refresh part (only for newly created runs or running historical runs)
 	var autoRefreshPart string
-	if isNewlyCreatedRun || strings.ToUpper(currentRunStatus) == "RUNNING" {
+	if !isLogLoadingInProgress && (isNewlyCreatedRun || strings.ToUpper(currentRunStatus) == "RUNNING") {
 		autoRefreshPart = fmt.Sprintf(" | Auto-refresh: %s", getAutoRefreshStatus())
 	}
 
@@ -329,7 +348,7 @@ func updateLogStatusBar() {
 	instructionsPart := " | Press 'r' to refresh, 'q' to return, 'e' to edit, 'v' to view in pager"
 
 	// Combine all parts
-	statusText = statusPart + autoRefreshPart + instructionsPart
+	statusText = statusPart + loadingPart + autoRefreshPart + instructionsPart
 	statusColor = tcell.ColorDefault
 
 	logStatusBar.SetText(statusText)
@@ -761,7 +780,9 @@ func runPipelineWithBranch(selectedPipeline *api.Pipeline, app *tview.Applicatio
 			return
 		}
 		currentRunID = runResponse.RunID
-		currentRunStatus = "RUNNING" // New runs start as RUNNING
+		currentRunStatus = "RUNNING"   // New runs start as RUNNING
+		originalRunStatus = "RUNNING"  // Store original status
+		preserveOriginalStatus = false // Allow status updates for newly created runs
 		isLogViewActive = true
 		isNewlyCreatedRun = true // Mark this as a newly created run
 
@@ -884,6 +905,7 @@ func stopLogAutoRefresh() {
 }
 
 // fetchAndDisplayLogs fetches and displays the current logs for the running pipeline
+// This function now uses progressive loading to show logs as they are fetched
 func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, pipelineName, branchInfo, repoInfo string) {
 	if currentRunID == "" || currentPipelineIDForRun == "" {
 		return
@@ -894,89 +916,393 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 		return
 	}
 
-	// Fetch complete logs (this will internally get run details as well)
-	logs, err := apiClient.GetPipelineRunLogs(orgId, currentPipelineIDForRun, currentRunID)
+	// Start progressive log loading
+	startProgressiveLogLoading(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+}
 
-	// Use a safe update mechanism
-	app.QueueUpdateDraw(func() {
-		// Double-check that we're still in log view mode
-		if !isLogViewActive {
-			return
+// getVMDeploymentLogs fetches logs for VM deployment jobs
+func getVMDeploymentLogs(apiClient *api.Client, orgId, pipelineIdStr, runIdStr string, job api.Job) (string, error) {
+	var logs strings.Builder
+
+	// Extract deployOrderId from job actions
+	deployOrderId, err := extractDeployOrderIdFromActions(job.Actions)
+	if err != nil {
+		logs.WriteString(fmt.Sprintf("Error extracting deployOrderId from job actions: %v\n", err))
+		// For running deployments, the deployOrderId might not be available yet
+		if job.Status == "RUNNING" || job.Status == "QUEUED" {
+			logs.WriteString("Deployment is still in progress. Deploy order information will be available once the deployment starts.\n")
+		} else if job.Status == "FAILED" {
+			logs.WriteString("Deployment job failed. No deploy order information available.\n")
+		} else {
+			logs.WriteString("Deploy order information is not available for this job.\n")
 		}
+		return logs.String(), nil
+	}
 
-		// Check if logViewTextView is still valid before updating
-		if logViewTextView == nil {
-			return
+	// Get VM deployment order details
+	deployOrder, err := apiClient.GetVMDeployOrder(orgId, pipelineIdStr, deployOrderId)
+	if err != nil {
+		logs.WriteString(fmt.Sprintf("Error fetching VM deploy order %s: %v\n", deployOrderId, err))
+		logs.WriteString("Unable to retrieve deployment details at this time.\n")
+		return logs.String(), nil
+	}
+
+	logs.WriteString(fmt.Sprintf("[yellow]Deploy Order ID: %d[-]\n", deployOrder.DeployOrderId))
+	logs.WriteString(fmt.Sprintf("[yellow]Deploy Status: %s[-]\n", deployOrder.Status))
+	logs.WriteString(fmt.Sprintf("[yellow]Current Batch: %d/%d[-]\n", deployOrder.CurrentBatch, deployOrder.TotalBatch))
+	logs.WriteString(fmt.Sprintf("[yellow]Host Group ID: %d[-]\n", deployOrder.DeployMachineInfo.HostGroupId))
+	logs.WriteString("[yellow]" + strings.Repeat("-", 40) + "[-]\n")
+
+	// Get logs for each machine in the deployment
+	if len(deployOrder.DeployMachineInfo.DeployMachines) == 0 {
+		logs.WriteString("No machines found in this deployment.\n")
+	} else {
+		for i, machine := range deployOrder.DeployMachineInfo.DeployMachines {
+			logs.WriteString(fmt.Sprintf("[yellow]Machine #%d: %s (SN: %s)[-]\n", i+1, machine.IP, machine.MachineSn))
+			logs.WriteString(fmt.Sprintf("[yellow]Machine Status: %s, Client Status: %s[-]\n", machine.Status, machine.ClientStatus))
+			logs.WriteString(fmt.Sprintf("[yellow]Batch: %d[-]\n", machine.BatchNum))
+			logs.WriteString("[yellow]" + strings.Repeat(".", 30) + "[-]\n")
+
+			// Get machine deployment log
+			machineLog, err := apiClient.GetVMDeployMachineLog(orgId, pipelineIdStr, deployOrderId, machine.MachineSn)
+			if err != nil {
+				logs.WriteString(fmt.Sprintf("Error fetching machine log for %s: %v\n", machine.MachineSn, err))
+			} else {
+				if machineLog.DeployBeginTime != "" {
+					logs.WriteString(fmt.Sprintf("Deploy Begin Time: %s\n", machineLog.DeployBeginTime))
+				}
+				if machineLog.DeployEndTime != "" {
+					logs.WriteString(fmt.Sprintf("Deploy End Time: %s\n", machineLog.DeployEndTime))
+				}
+				if machineLog.AliyunRegion != "" {
+					logs.WriteString(fmt.Sprintf("Region: %s\n", machineLog.AliyunRegion))
+				}
+				if machineLog.DeployLogPath != "" {
+					logs.WriteString(fmt.Sprintf("Log Path: %s\n", machineLog.DeployLogPath))
+				}
+				logs.WriteString("Deploy Log:\n")
+				if machineLog.DeployLog == "" {
+					logs.WriteString("No deployment logs available for this machine.\n")
+				} else {
+					logs.WriteString(machineLog.DeployLog)
+					if !strings.HasSuffix(machineLog.DeployLog, "\n") {
+						logs.WriteString("\n")
+					}
+				}
+			}
+			logs.WriteString("\n")
 		}
+	}
 
-		// Extract status from logs for status tracking
-		var extractedStatus string = "RUNNING" // Default status
-		if logs != "" {
-			if strings.Contains(logs, "Status: SUCCESS") {
-				extractedStatus = "SUCCESS"
-			} else if strings.Contains(logs, "Status: FAILED") {
-				extractedStatus = "FAILED"
-			} else if strings.Contains(logs, "Status: CANCELED") {
-				extractedStatus = "CANCELED"
-			} else if strings.Contains(logs, "Status: RUNNING") {
-				extractedStatus = "RUNNING"
+	return logs.String(), nil
+}
+
+// extractDeployOrderIdFromActions extracts deployOrderId from job actions array
+// This is a local implementation for UI use
+func extractDeployOrderIdFromActions(actions []api.JobAction) (string, error) {
+	if len(actions) == 0 {
+		return "", fmt.Errorf("no actions found in job")
+	}
+
+	// Look for GetVMDeployOrder action
+	for _, action := range actions {
+		if action.Type == "GetVMDeployOrder" {
+			// First try to get deployOrderId from action.params
+			if action.Params != nil {
+				if deployOrderId, ok := action.Params["deployOrderId"]; ok {
+					if id, ok := deployOrderId.(float64); ok {
+						return fmt.Sprintf("%.0f", id), nil
+					}
+					if id, ok := deployOrderId.(string); ok {
+						return id, nil
+					}
+				}
+			}
+
+			// Then try to parse from action.data JSON string
+			if action.Data != "" {
+				var actionData map[string]interface{}
+				if err := json.Unmarshal([]byte(action.Data), &actionData); err != nil {
+					continue
+				}
+
+				// Look for deployOrderId in various possible locations
+				if deployOrderId, ok := actionData["deployOrderId"]; ok {
+					if id, ok := deployOrderId.(float64); ok {
+						return fmt.Sprintf("%.0f", id), nil
+					}
+					if id, ok := deployOrderId.(string); ok {
+						return id, nil
+					}
+				}
+
+				// Check nested structure
+				if data, ok := actionData["data"].(map[string]interface{}); ok {
+					if deployOrderIdData, ok := data["deployOrderId"].(map[string]interface{}); ok {
+						if id, ok := deployOrderIdData["id"].(float64); ok {
+							return fmt.Sprintf("%.0f", id), nil
+						}
+						if id, ok := deployOrderIdData["id"].(string); ok {
+							return id, nil
+						}
+					}
+				}
 			}
 		}
-		currentRunStatus = extractedStatus
+	}
 
-		// Update status bar
-		updateLogStatusBar()
+	return "", fmt.Errorf("deployOrderId not found in job actions")
+}
 
-		// Build the complete log display
+// startProgressiveLogLoading starts loading logs progressively job by job
+func startProgressiveLogLoading(app *tview.Application, apiClient *api.Client, orgId, pipelineName, branchInfo, repoInfo string) {
+	// Reset loading state
+	isLogLoadingInProgress = true
+	logLoadingCurrentJob = 0
+	logLoadingTotalJobs = 0
+	logLoadingComplete = false
+	logLoadingError = nil
+
+	// Initialize log display with header
+	app.QueueUpdateDraw(func() {
+		if !isLogViewActive || logViewTextView == nil {
+			return
+		}
+
+		// Build initial header
 		var logText strings.Builder
-
-		// Header information
 		logText.WriteString(fmt.Sprintf("Pipeline: %s\n", pipelineName))
 		logText.WriteString(fmt.Sprintf("Run ID: %s\n", currentRunID))
 		logText.WriteString(fmt.Sprintf("Branch: %s\n", branchInfo))
 		if repoInfo != "" {
 			logText.WriteString(fmt.Sprintf("Repository: %s\n", repoInfo))
 		}
-
-		// Add refresh timestamp
 		logText.WriteString(fmt.Sprintf("Last Updated: %s\n", time.Now().Format("2006-01-02 15:04:05")))
 		logText.WriteString(strings.Repeat("=", 80) + "\n\n")
+		logText.WriteString("Loading pipeline run details...\n")
 
-		// Add logs content
+		logViewTextView.SetText(logText.String())
+		updateLogStatusBar()
+	})
+
+	// Start loading in a goroutine
+	go func() {
+		// Step 1: Get pipeline run details to obtain job list
+		runDetails, err := apiClient.GetPipelineRunDetails(orgId, currentPipelineIDForRun, currentRunID)
 		if err != nil {
-			logText.WriteString(fmt.Sprintf("Error fetching logs: %v\n\n", err))
-			logText.WriteString("Note: Log fetching may require additional parameters or the pipeline may still be initializing.\n")
-		} else if logs == "" {
-			logText.WriteString("No logs available yet. The pipeline may still be starting...\n")
-		} else {
-			logText.WriteString(logs)
+			logLoadingError = err
+			isLogLoadingInProgress = false
+			app.QueueUpdateDraw(func() {
+				if !isLogViewActive || logViewTextView == nil {
+					return
+				}
+
+				var logText strings.Builder
+				logText.WriteString(fmt.Sprintf("Pipeline: %s\n", pipelineName))
+				logText.WriteString(fmt.Sprintf("Run ID: %s\n", currentRunID))
+				logText.WriteString(fmt.Sprintf("Branch: %s\n", branchInfo))
+				if repoInfo != "" {
+					logText.WriteString(fmt.Sprintf("Repository: %s\n", repoInfo))
+				}
+				logText.WriteString(fmt.Sprintf("Last Updated: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+				logText.WriteString(strings.Repeat("=", 80) + "\n\n")
+				logText.WriteString(fmt.Sprintf("Error fetching pipeline run details: %v\n\n", err))
+				logText.WriteString("Note: Log fetching may require additional parameters or the pipeline may still be initializing.\n")
+
+				logViewTextView.SetText(logText.String())
+				updateLogStatusBar()
+			})
+			return
 		}
 
-		// Add footer separator (instructions now in status bar)
-		logText.WriteString("\n" + strings.Repeat("=", 80) + "\n")
+		// Update status if not preserving original status
+		if !preserveOriginalStatus {
+			currentRunStatus = runDetails.Status
+		}
 
-		// Handle delayed auto-refresh stop logic
-		if extractedStatus == "SUCCESS" || extractedStatus == "FAILED" || extractedStatus == "CANCELED" {
-			if !pipelineFinished {
-				// Pipeline just finished
-				pipelineFinished = true
-				finishedRefreshCount = 0
+		// Count total jobs
+		totalJobs := 0
+		for _, stage := range runDetails.Stages {
+			totalJobs += len(stage.Jobs)
+		}
+		logLoadingTotalJobs = totalJobs
+
+		// Update initial display with run details
+		app.QueueUpdateDraw(func() {
+			if !isLogViewActive || logViewTextView == nil {
+				return
+			}
+
+			var logText strings.Builder
+			logText.WriteString(fmt.Sprintf("Pipeline: %s\n", pipelineName))
+			logText.WriteString(fmt.Sprintf("Run ID: %s\n", currentRunID))
+			logText.WriteString(fmt.Sprintf("Branch: %s\n", branchInfo))
+			if repoInfo != "" {
+				logText.WriteString(fmt.Sprintf("Repository: %s\n", repoInfo))
+			}
+			logText.WriteString(fmt.Sprintf("Last Updated: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+			logText.WriteString("=" + strings.Repeat("=", 80) + "\n\n")
+			logText.WriteString(fmt.Sprintf("Pipeline Run Logs - Run ID: %s\n", currentRunID))
+			logText.WriteString(fmt.Sprintf("Pipeline ID: %s\n", currentPipelineIDForRun))
+			logText.WriteString(fmt.Sprintf("Status: %s\n", runDetails.Status))
+			logText.WriteString("=" + strings.Repeat("=", 80) + "\n\n")
+
+			if totalJobs == 0 {
+				logText.WriteString("No jobs found in this pipeline run.\n")
+				isLogLoadingInProgress = false
+				logLoadingComplete = true
 			} else {
-				// Pipeline was already finished, increment counter
-				finishedRefreshCount++
-				if finishedRefreshCount >= 3 {
-					// Stop auto-refresh after 3 additional refreshes
-					stopLogAutoRefresh()
+				logText.WriteString(fmt.Sprintf("Found %d jobs to load. Loading logs progressively...\n\n", totalJobs))
+			}
+
+			logViewTextView.SetText(logText.String())
+			logViewTextView.ScrollToEnd()
+			updateLogStatusBar()
+		})
+
+		if totalJobs == 0 {
+			return
+		}
+
+		// Step 2: Load logs for each job progressively
+		currentJobIndex := 0
+		for _, stage := range runDetails.Stages {
+			if len(stage.Jobs) > 0 {
+				// Add stage header
+				app.QueueUpdateDraw(func() {
+					if !isLogViewActive || logViewTextView == nil {
+						return
+					}
+
+					currentText := logViewTextView.GetText(false)
+					currentText += fmt.Sprintf("[yellow]Stage: %s (%s)[-]\n", stage.Name, stage.Index)
+					currentText += "-" + strings.Repeat("-", 60) + "\n\n"
+
+					logViewTextView.SetText(currentText)
+					logViewTextView.ScrollToEnd()
+				})
+			}
+
+			for _, job := range stage.Jobs {
+				currentJobIndex++
+				logLoadingCurrentJob = currentJobIndex
+
+				// Update progress
+				app.QueueUpdateDraw(func() {
+					updateLogStatusBar()
+				})
+
+				// Add job header
+				app.QueueUpdateDraw(func() {
+					if !isLogViewActive || logViewTextView == nil {
+						return
+					}
+
+					currentText := logViewTextView.GetText(false)
+					currentText += fmt.Sprintf("[yellow]Job #%d: %s (ID: %d)[-]\n", currentJobIndex, job.Name, job.ID)
+					currentText += fmt.Sprintf("[yellow]Job Sign: %s[-]\n", job.JobSign)
+					currentText += fmt.Sprintf("[yellow]Status: %s[-]\n", job.Status)
+					if !job.StartTime.IsZero() {
+						currentText += fmt.Sprintf("[yellow]Start Time: %s[-]\n", job.StartTime.Format("2006-01-02 15:04:05"))
+					}
+					if !job.EndTime.IsZero() {
+						currentText += fmt.Sprintf("[yellow]End Time: %s[-]\n", job.EndTime.Format("2006-01-02 15:04:05"))
+					}
+					currentText += "[yellow]" + strings.Repeat("=", 50) + "[-]\n"
+
+					logViewTextView.SetText(currentText)
+					logViewTextView.ScrollToEnd()
+				})
+
+				// Fetch logs for this specific job
+				var jobLogs string
+				var jobErr error
+
+				// Check if this job has GetVMDeployOrder action
+				hasVMDeployAction := false
+				for _, action := range job.Actions {
+					if action.Type == "GetVMDeployOrder" {
+						hasVMDeployAction = true
+						break
+					}
 				}
+
+				if hasVMDeployAction {
+					// Handle VM deployment job with full implementation
+					jobLogs, jobErr = getVMDeploymentLogs(apiClient, orgId, currentPipelineIDForRun, currentRunID, job)
+				} else {
+					// Regular job - fetch logs
+					jobIdStr := fmt.Sprintf("%d", job.ID)
+					jobLogs, jobErr = apiClient.GetPipelineJobRunLog(orgId, currentPipelineIDForRun, currentRunID, jobIdStr)
+				}
+
+				// Add job logs to display
+				app.QueueUpdateDraw(func() {
+					if !isLogViewActive || logViewTextView == nil {
+						return
+					}
+
+					currentText := logViewTextView.GetText(false)
+
+					if jobErr != nil {
+						currentText += fmt.Sprintf("Error fetching logs for job %s: %v\n", fmt.Sprintf("%d", job.ID), jobErr)
+					} else if jobLogs == "" {
+						currentText += "No logs available for this job.\n"
+					} else {
+						currentText += jobLogs
+						if !strings.HasSuffix(jobLogs, "\n") {
+							currentText += "\n"
+						}
+					}
+
+					currentText += "\n" + strings.Repeat("=", 80) + "\n\n"
+
+					logViewTextView.SetText(currentText)
+					logViewTextView.ScrollToEnd()
+				})
+
+				// Small delay to make progressive loading visible
+				time.Sleep(100 * time.Millisecond)
 			}
 		}
 
-		// Final check before updating UI
-		if logViewTextView != nil {
-			logViewTextView.SetText(logText.String())
+		// Mark loading as complete
+		isLogLoadingInProgress = false
+		logLoadingComplete = true
+
+		// Final update
+		app.QueueUpdateDraw(func() {
+			if !isLogViewActive || logViewTextView == nil {
+				return
+			}
+
+			currentText := logViewTextView.GetText(false)
+			currentText += fmt.Sprintf("Total jobs processed: %d\n", currentJobIndex)
+
+			// Handle delayed auto-refresh stop logic
+			if !preserveOriginalStatus {
+				finalStatus := strings.ToUpper(currentRunStatus)
+				if finalStatus == "SUCCESS" || finalStatus == "FAILED" || finalStatus == "CANCELED" {
+					if !pipelineFinished {
+						// Pipeline just finished
+						pipelineFinished = true
+						finishedRefreshCount = 0
+					} else {
+						// Pipeline was already finished, increment counter
+						finishedRefreshCount++
+						if finishedRefreshCount >= 3 {
+							// Stop auto-refresh after 3 additional refreshes
+							stopLogAutoRefresh()
+						}
+					}
+				}
+			}
+
+			logViewTextView.SetText(currentText)
 			logViewTextView.ScrollToEnd()
-		}
-	})
+			updateLogStatusBar()
+		})
+	}()
 }
 
 // updateRunHistoryTable updates the run history table for a specific pipeline
@@ -1904,11 +2230,13 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			if rowCount > 1 && currentRow > 0 {
 				if selectedRun, ok := runHistoryRowMap[currentRow]; ok && selectedRun != nil {
 					currentRunID = selectedRun.RunID
-					currentRunStatus = selectedRun.Status // Initialize status from selected run
+					currentRunStatus = selectedRun.Status  // Initialize status from selected run
+					originalRunStatus = selectedRun.Status // Store original status
+					preserveOriginalStatus = true          // Preserve the original status for historical runs
 					isLogViewActive = true
 					isNewlyCreatedRun = false // Mark this as a historical run
 
-					// Switch to log view and start auto-refresh for historical runs
+					// Switch to log view and start progressive log loading
 					go func() {
 						app.QueueUpdateDraw(func() {
 							if logViewTextView != nil {
@@ -1930,7 +2258,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 							// Only auto-refresh for running pipelines
 							startLogAutoRefresh(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
 						} else {
-							// For completed runs, just fetch once
+							// For completed runs, just fetch once with progressive loading
 							fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
 						}
 					}()
