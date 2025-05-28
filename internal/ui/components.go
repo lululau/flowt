@@ -270,10 +270,19 @@ func HideModal() {
 		return
 	}
 	mainPagesGlobal.RemovePage("modal")
-	// Try to restore focus to a sensible default, like the pipeline table
-	if pipelineTableGlobal != nil && (currentViewMode == "all_pipelines" || currentViewMode == "pipelines_in_group") {
+
+	// Restore focus based on current active view
+	if isLogViewActive && logViewTextView != nil {
+		// If log view is active, restore focus to log view
+		appGlobal.SetFocus(logViewTextView)
+	} else if isRunHistoryActive && runHistoryTable != nil {
+		// If run history is active, restore focus to run history table
+		appGlobal.SetFocus(runHistoryTable)
+	} else if pipelineTableGlobal != nil && (currentViewMode == "all_pipelines" || currentViewMode == "pipelines_in_group") {
+		// Default to pipeline table for pipeline views
 		appGlobal.SetFocus(pipelineTableGlobal)
 	} else if currentViewMode == "group_list" && groupTableGlobal != nil {
+		// Default to group table for group list view
 		appGlobal.SetFocus(groupTableGlobal)
 	}
 }
@@ -345,7 +354,7 @@ func updateLogStatusBar() {
 	}
 
 	// Build instructions part
-	instructionsPart := " | Press 'r' to refresh, 'q' to return, 'e' to edit, 'v' to view in pager"
+	instructionsPart := " | Press 'r' to refresh, 'X' to stop run, 'q' to return, 'e' to edit, 'v' to view in pager"
 
 	// Combine all parts
 	statusText = statusPart + loadingPart + autoRefreshPart + instructionsPart
@@ -1292,7 +1301,7 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 	table.Clear()
 
 	// Update title with pagination info
-	title := fmt.Sprintf("Run History - %s (Page %d/%d) [/] to navigate, 0 to go to first page",
+	title := fmt.Sprintf("Run History - %s (Page %d/%d) ] to next page, [ to previous page, 0 to go to first page",
 		pipelineName, currentRunHistoryPage, totalRunHistoryPages)
 	table.SetTitle(title)
 
@@ -1345,7 +1354,7 @@ func updateRunHistoryTable(table *tview.Table, app *tview.Application, apiClient
 	}
 
 	// Update title with correct pagination info
-	title = fmt.Sprintf("Run History - %s (Page %d/%d) [/] to navigate, 0 to go to first page",
+	title = fmt.Sprintf("Run History - %s (Page %d/%d) ] to next page, [ to previous page, 0 to go to first page",
 		pipelineName, currentRunHistoryPage, totalRunHistoryPages)
 	table.SetTitle(title)
 
@@ -1995,7 +2004,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Run history help info
 	runHistoryHelpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=view logs, r=run pipeline, [/]=prev/next page, 0=first page, q=back to pipelines, Q=quit").
+		SetText("Keys: j/k=move, Enter=view logs, r=run pipeline, X=stop run, [/]=prev/next page, 0=first page, q=back to pipelines, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	runHistoryHelpInfo.SetBackgroundColor(tcell.ColorDefault)
@@ -2280,6 +2289,34 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
 			return nil
+		case 'X':
+			// Stop/terminate pipeline run
+			if rowCount > 1 && currentRow > 0 {
+				if selectedRun, ok := runHistoryRowMap[currentRow]; ok && selectedRun != nil {
+					// Show confirmation dialog
+					ShowModal("Confirm Stop",
+						fmt.Sprintf("Are you sure you want to stop pipeline run #%s?\nStatus: %s", selectedRun.RunID, selectedRun.Status),
+						[]string{"Yes", "No"},
+						func(buttonIndex int, buttonLabel string) {
+							if buttonIndex == 0 { // Yes
+								go func() {
+									err := apiClient.StopPipelineRun(orgId, currentPipelineIDForRun, selectedRun.RunID)
+									app.QueueUpdateDraw(func() {
+										if err != nil {
+											ShowModal("Error", fmt.Sprintf("Failed to stop pipeline run: %v", err), []string{"OK"}, nil)
+										} else {
+											ShowModal("Success", "Pipeline run stop request sent successfully.", []string{"OK"}, func(buttonIndex int, buttonLabel string) {
+												// Refresh the run history table to show updated status
+												updateRunHistoryTable(runHistoryTable, app, apiClient, orgId, currentPipelineIDForRun, currentPipelineName)
+											})
+										}
+									})
+								}()
+							}
+						})
+				}
+			}
+			return nil
 		case '[':
 			// Previous page
 			if currentRunHistoryPage > 1 {
@@ -2387,6 +2424,46 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				// Perform manual refresh
 				fetchAndDisplayLogs(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
 			}()
+			return nil
+		case 'X':
+			// Stop/terminate pipeline run (only for running/init/waiting status)
+			if currentRunID != "" && currentPipelineIDForRun != "" {
+				// Check if the current run status allows termination
+				status := strings.ToUpper(currentRunStatus)
+				if status == "RUNNING" || status == "INIT" || status == "WAITING" || status == "QUEUED" {
+					// Show confirmation dialog
+					ShowModal("Confirm Stop",
+						fmt.Sprintf("Are you sure you want to stop the current pipeline run?\nRun ID: %s\nStatus: %s", currentRunID, currentRunStatus),
+						[]string{"Yes", "No"},
+						func(buttonIndex int, buttonLabel string) {
+							if buttonIndex == 0 { // Yes
+								go func() {
+									err := apiClient.StopPipelineRun(orgId, currentPipelineIDForRun, currentRunID)
+									app.QueueUpdateDraw(func() {
+										if err != nil {
+											ShowModal("Error", fmt.Sprintf("Failed to stop pipeline run: %v", err), []string{"OK"}, nil)
+										} else {
+											ShowModal("Success", "Pipeline run stop request sent successfully.", []string{"OK"}, func(buttonIndex int, buttonLabel string) {
+												// Stop auto-refresh since we terminated the run
+												stopLogAutoRefresh()
+												// Update status to reflect termination request
+												currentRunStatus = "STOPPING"
+												updateLogStatusBar()
+											})
+										}
+									})
+								}()
+							}
+						})
+				} else {
+					// Show message that run cannot be stopped
+					ShowModal("Cannot Stop",
+						fmt.Sprintf("Pipeline run cannot be stopped.\nCurrent status: %s\n\nOnly runs with status RUNNING, INIT, WAITING, or QUEUED can be stopped.", currentRunStatus),
+						[]string{"OK"}, nil)
+				}
+			} else {
+				ShowModal("No Active Run", "No active pipeline run to stop.", []string{"OK"}, nil)
+			}
 			return nil
 		case 'e':
 			// Open logs in editor

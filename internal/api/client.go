@@ -879,12 +879,83 @@ func (c *Client) RunPipeline(organizationId string, pipelineIdStr string, params
 
 // StopPipelineRun stops a pipeline run.
 func (c *Client) StopPipelineRun(organizationId string, pipelineId string, runId string) error {
-	// request := devops_rdc.CreateStopPipelineRunRequest() // Or similar
-	// request.OrgId = organizationId
-	// request.PipelineId = pipelineId
-	// request.RunId = runId
-	// ...
-	return fmt.Errorf("not implemented: StopPipelineRun")
+	if organizationId == "" {
+		return fmt.Errorf("organizationId is required")
+	}
+	if pipelineId == "" {
+		return fmt.Errorf("pipelineId is required")
+	}
+	if runId == "" {
+		return fmt.Errorf("runId is required")
+	}
+
+	// Use different methods based on authentication type
+	if c.useToken {
+		return c.stopPipelineRunWithToken(organizationId, pipelineId, runId)
+	}
+
+	// TODO: Implement SDK-based method for AccessKey authentication
+	return fmt.Errorf("StopPipelineRun with AccessKey authentication not implemented yet")
+}
+
+// stopPipelineRunWithToken stops a pipeline run using personal access token authentication
+// Based on official API: https://help.aliyun.com/zh/yunxiao/developer-reference/updatepipelinerun
+func (c *Client) stopPipelineRunWithToken(organizationId, pipelineId, runId string) error {
+	// API endpoint: PUT https://{domain}/oapi/v1/flow/organizations/{organizationId}/pipelines/{pipelineId}/runs/{pipelineRunId}
+	path := fmt.Sprintf("/oapi/v1/flow/organizations/%s/pipelines/%s/runs/%s", organizationId, pipelineId, runId)
+	url := fmt.Sprintf("https://%s%s", c.endpoint, path)
+
+	req, err := http.NewRequest("PUT", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("x-yunxiao-token", c.personalAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "flowt-aliyun-devops-client/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if os.Getenv("FLOWT_DEBUG") == "1" {
+		debugLogger.Printf("StopPipelineRun URL: %s", url)
+		debugLogger.Printf("Response Status: %d", resp.StatusCode)
+		debugLogger.Printf("Response Body: %s", string(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// According to API documentation, response is a boolean indicating success
+	var success bool
+	if err := json.Unmarshal(respBody, &success); err != nil {
+		// If response is not a boolean, try to parse as string "true"/"false"
+		responseStr := strings.TrimSpace(string(respBody))
+		responseStr = strings.Trim(responseStr, "\"") // Remove quotes if present
+		if responseStr == "true" {
+			success = true
+		} else if responseStr == "false" {
+			success = false
+		} else {
+			return fmt.Errorf("failed to parse response as boolean: %w. Response: %s", err, string(respBody))
+		}
+	}
+
+	if !success {
+		return fmt.Errorf("failed to stop pipeline run: API returned false")
+	}
+
+	return nil
 }
 
 // PipelineRunInfo contains detailed information about a pipeline run including repository information
