@@ -233,6 +233,14 @@ var (
 	logLoadingError        error  // Error during log loading
 	originalRunStatus      string // Original status from run history (to prevent overwriting)
 	preserveOriginalStatus bool   // Whether to preserve the original status
+
+	// Vim-style search state for log view
+	logSearchActive     bool              // Whether search mode is active
+	logSearchQuery      string            // Current search query
+	logSearchMatches    []int             // Byte positions of all matches in the log text
+	logSearchCurrentIdx int               // Current match index (0-based)
+	logOriginalText     string            // Original text without search highlighting
+	logSearchInput      *tview.InputField // Search input field for log view
 )
 
 // ShowModal displays a modal dialog.
@@ -354,7 +362,7 @@ func updateLogStatusBar() {
 	}
 
 	// Build instructions part
-	instructionsPart := " | Press 'r' to refresh, 'X' to stop run, 'q' to return, 'e' to edit, 'v' to view in pager"
+	instructionsPart := " | Press '/' to search, 'f'/'b' page down/up, 'd'/'u' half-page, 'r' refresh, 'X' stop, 'q' return, 'e' edit, 'v' pager"
 
 	// Combine all parts
 	statusText = statusPart + loadingPart + autoRefreshPart + instructionsPart
@@ -907,8 +915,38 @@ func fetchAndDisplayLogs(app *tview.Application, apiClient *api.Client, orgId, p
 		return
 	}
 
+	// Store search state before updating logs
+	wasSearchActive := logSearchActive
+	searchQuery := logSearchQuery
+
+	// Clear search state temporarily during log update
+	if logSearchActive {
+		logSearchActive = false
+		logOriginalText = ""
+	}
+
 	// Start progressive log loading
 	startProgressiveLogLoading(app, apiClient, orgId, pipelineName, branchInfo, repoInfo)
+
+	// Note: Search state will be restored in the final update of startProgressiveLogLoading
+	// if the search was active before the update
+	if wasSearchActive && searchQuery != "" {
+		// Schedule search restoration after log loading completes
+		go func() {
+			// Wait for log loading to complete
+			for isLogLoadingInProgress {
+				time.Sleep(100 * time.Millisecond)
+			}
+
+			// Restore search state
+			app.QueueUpdateDraw(func() {
+				if isLogViewActive && logViewTextView != nil {
+					logOriginalText = logViewTextView.GetText(false)
+					performLogSearch(searchQuery, app)
+				}
+			})
+		}()
+	}
 }
 
 // getVMDeploymentLogs fetches logs for VM deployment jobs
@@ -2412,7 +2450,71 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// --- Event Handlers for logViewTextView ---
 	logViewTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// Handle vim-style search navigation first
+		if logSearchActive {
+			switch event.Rune() {
+			case 'n':
+				// Next search match
+				nextLogSearchMatch(app)
+				return nil
+			case 'N':
+				// Previous search match
+				prevLogSearchMatch(app)
+				return nil
+			case '/':
+				// Start vim-style search
+				startLogSearch(app)
+				return nil
+			}
+
+			// Handle escape to exit search
+			if event.Key() == tcell.KeyEscape {
+				exitLogSearch(app)
+				return nil
+			}
+		}
+
 		switch event.Rune() {
+		case '/':
+			// Start vim-style search
+			if !logSearchActive {
+				startLogSearch(app)
+			}
+			return nil
+		case 'n':
+			// Next search match (only if search is active)
+			if logSearchActive {
+				nextLogSearchMatch(app)
+			}
+			return nil
+		case 'N':
+			// Previous search match (only if search is active)
+			if logSearchActive {
+				prevLogSearchMatch(app)
+			}
+			return nil
+		case 'f':
+			// Page down (same as Ctrl+F)
+			logViewTextView.InputHandler()(tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone), nil)
+			return nil
+		case 'b':
+			// Page up (same as Ctrl+B) - but only if not exiting
+			if !logSearchActive {
+				logViewTextView.InputHandler()(tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone), nil)
+			}
+			return nil
+		case 'd':
+			// Half page down
+			for i := 0; i < 10; i++ {
+				logViewTextView.InputHandler()(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone), nil)
+			}
+			return nil
+		case 'u':
+			// Half page up
+			for i := 0; i < 10; i++ {
+				logViewTextView.InputHandler()(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone), nil)
+			}
+			return nil
 		case 'r':
 			// Manual refresh
 			go func() {
@@ -2489,10 +2591,20 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				}
 			}
 			return nil
-		case 'b', 'q':
+		case 'q':
+			// Exit search mode if active, otherwise exit log view
+			if logSearchActive {
+				exitLogSearch(app)
+				return nil
+			}
+			// Exit log view
 			isLogViewActive = false
 			// Stop auto-refresh when leaving log view
 			stopLogAutoRefresh()
+			// Exit search mode if active
+			if logSearchActive {
+				exitLogSearch(app)
+			}
 			if isRunHistoryActive {
 				// Return to run history if we came from there
 				mainPages.SwitchToPage("run_history")
@@ -2505,10 +2617,30 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			return nil
 		}
 
-		if event.Key() == tcell.KeyEscape {
+		// Handle special keys
+		switch event.Key() {
+		case tcell.KeyCtrlF:
+			// Page down
+			logViewTextView.InputHandler()(tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone), nil)
+			return nil
+		case tcell.KeyCtrlB:
+			// Page up
+			logViewTextView.InputHandler()(tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone), nil)
+			return nil
+		case tcell.KeyEscape:
+			// Exit search mode if active, otherwise exit log view
+			if logSearchActive {
+				exitLogSearch(app)
+				return nil
+			}
+			// Exit log view
 			isLogViewActive = false
 			// Stop auto-refresh when leaving log view
 			stopLogAutoRefresh()
+			// Exit search mode if active
+			if logSearchActive {
+				exitLogSearch(app)
+			}
 			if isRunHistoryActive {
 				// Return to run history if we came from there
 				mainPages.SwitchToPage("run_history")
@@ -2536,6 +2668,9 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 				return nil
 			} else if currentPage == "groups" { // Allow search focus on groups page
 				app.SetFocus(groupSearchInput)
+				return nil
+			} else if currentPage == "logs" && !logSearchActive { // Allow search in logs page
+				startLogSearch(app)
 				return nil
 			}
 		}
@@ -2574,9 +2709,9 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			app.Stop()
 			return nil // Consumed
 		case 'q': // Lowercase q
-			// If searchInput or groupSearchInput is focused, it needs to process 'q' for typing.
+			// If searchInput, groupSearchInput, or logSearchInput is focused, it needs to process 'q' for typing.
 			// Their own InputCapture should return event to allow typing.
-			if focused == searchInput || focused == groupSearchInputGlobal {
+			if focused == searchInput || focused == groupSearchInputGlobal || focused == logSearchInput {
 				return event
 			}
 			// In all other cases where 'q' bubbles up to the app level,
@@ -2592,4 +2727,250 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	})
 
 	return mainPages
+}
+
+// startLogSearch initiates vim-style search in log view
+func startLogSearch(app *tview.Application) {
+	if logViewTextView == nil || logPage == nil {
+		return
+	}
+
+	// Create search input if it doesn't exist
+	if logSearchInput == nil {
+		logSearchInput = tview.NewInputField().
+			SetLabel("Search: ").
+			SetPlaceholder("Enter search term...").
+			SetFieldWidth(0)
+		logSearchInput.SetFieldBackgroundColor(tcell.ColorDefault)
+		logSearchInput.SetPlaceholderStyle(tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(tcell.ColorGray))
+	}
+
+	// Store original text if not already stored
+	if logOriginalText == "" {
+		logOriginalText = logViewTextView.GetText(false)
+	}
+
+	// Clear previous search state
+	logSearchQuery = ""
+	logSearchMatches = []int{}
+	logSearchCurrentIdx = -1
+	logSearchActive = true
+
+	// Set up search input handlers
+	logSearchInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter {
+			query := logSearchInput.GetText()
+			if query != "" {
+				performLogSearch(query, app)
+			}
+			// Transfer focus to log text view after pressing Enter
+			// so that n/N navigation keys work
+			app.SetFocus(logViewTextView)
+		} else if key == tcell.KeyEscape {
+			exitLogSearch(app)
+		}
+	})
+
+	logSearchInput.SetChangedFunc(func(text string) {
+		if text != "" {
+			performLogSearch(text, app)
+		} else {
+			// Clear search highlighting when text is empty
+			clearLogSearchHighlighting()
+		}
+	})
+
+	// Add search input to log page
+	logPage.Clear()
+	logPage.AddItem(logSearchInput, 1, 1, true)
+	logPage.AddItem(logViewTextView, 0, 1, false)
+	logPage.AddItem(logStatusBar, 1, 1, false)
+
+	app.SetFocus(logSearchInput)
+}
+
+// performLogSearch performs the actual search and highlighting
+func performLogSearch(query string, app *tview.Application) {
+	if logViewTextView == nil || query == "" {
+		return
+	}
+
+	logSearchQuery = query
+	text := logOriginalText
+	if text == "" {
+		text = logViewTextView.GetText(false)
+		logOriginalText = text
+	}
+
+	// Find all matches (case-insensitive)
+	logSearchMatches = []int{}
+	queryLower := strings.ToLower(query)
+	textLower := strings.ToLower(text)
+
+	start := 0
+	for {
+		idx := strings.Index(textLower[start:], queryLower)
+		if idx == -1 {
+			break
+		}
+		logSearchMatches = append(logSearchMatches, start+idx)
+		start = start + idx + 1
+	}
+
+	if len(logSearchMatches) > 0 {
+		logSearchCurrentIdx = 0
+		highlightLogSearchMatches(text, query, app)
+	} else {
+		logSearchCurrentIdx = -1
+		// Show original text if no matches
+		logViewTextView.SetText(text)
+	}
+
+	updateLogSearchStatusBar()
+}
+
+// highlightLogSearchMatches highlights all search matches in the log text
+func highlightLogSearchMatches(text, query string, app *tview.Application) {
+	if len(logSearchMatches) == 0 {
+		return
+	}
+
+	// Create highlighted text
+	var result strings.Builder
+	lastEnd := 0
+
+	for i, matchPos := range logSearchMatches {
+		// Add text before this match
+		result.WriteString(text[lastEnd:matchPos])
+
+		// Add highlighted match
+		if i == logSearchCurrentIdx {
+			// Current match: gray background with gold foreground
+			result.WriteString("[gold:gray]")
+			result.WriteString(text[matchPos : matchPos+len(query)])
+			result.WriteString("[-:-]")
+		} else {
+			// Other matches: gray background with white foreground
+			result.WriteString("[white:gray]")
+			result.WriteString(text[matchPos : matchPos+len(query)])
+			result.WriteString("[-:-]")
+		}
+
+		lastEnd = matchPos + len(query)
+	}
+
+	// Add remaining text
+	result.WriteString(text[lastEnd:])
+
+	logViewTextView.SetText(result.String())
+
+	// Scroll to current match if there is one
+	if logSearchCurrentIdx >= 0 && logSearchCurrentIdx < len(logSearchMatches) {
+		scrollToLogSearchMatch(app)
+	}
+}
+
+// scrollToLogSearchMatch scrolls the log view to show the current search match
+func scrollToLogSearchMatch(app *tview.Application) {
+	if logViewTextView == nil || logSearchCurrentIdx < 0 || logSearchCurrentIdx >= len(logSearchMatches) {
+		return
+	}
+
+	// Calculate line number of current match
+	matchPos := logSearchMatches[logSearchCurrentIdx]
+	text := logOriginalText
+	if text == "" {
+		return
+	}
+
+	// Count newlines before the match position
+	lineNum := strings.Count(text[:matchPos], "\n")
+
+	// Scroll to the line (tview uses 0-based line numbers)
+	logViewTextView.ScrollTo(lineNum, 0)
+}
+
+// nextLogSearchMatch moves to the next search match
+func nextLogSearchMatch(app *tview.Application) {
+	if len(logSearchMatches) == 0 {
+		return
+	}
+
+	logSearchCurrentIdx = (logSearchCurrentIdx + 1) % len(logSearchMatches)
+	highlightLogSearchMatches(logOriginalText, logSearchQuery, app)
+	updateLogSearchStatusBar()
+}
+
+// prevLogSearchMatch moves to the previous search match
+func prevLogSearchMatch(app *tview.Application) {
+	if len(logSearchMatches) == 0 {
+		return
+	}
+
+	logSearchCurrentIdx--
+	if logSearchCurrentIdx < 0 {
+		logSearchCurrentIdx = len(logSearchMatches) - 1
+	}
+	highlightLogSearchMatches(logOriginalText, logSearchQuery, app)
+	updateLogSearchStatusBar()
+}
+
+// exitLogSearch exits search mode and restores normal log view
+func exitLogSearch(app *tview.Application) {
+	logSearchActive = false
+	logSearchQuery = ""
+	logSearchMatches = []int{}
+	logSearchCurrentIdx = -1
+
+	// Clear the search input field when exiting search mode
+	if logSearchInput != nil {
+		logSearchInput.SetText("")
+	}
+
+	// Restore original text
+	if logOriginalText != "" {
+		logViewTextView.SetText(logOriginalText)
+		logOriginalText = ""
+	}
+
+	// Restore original log page layout
+	logPage.Clear()
+	logPage.AddItem(logViewTextView, 0, 1, true)
+	logPage.AddItem(logStatusBar, 1, 1, false)
+
+	app.SetFocus(logViewTextView)
+	updateLogStatusBar() // Restore normal status bar
+}
+
+// clearLogSearchHighlighting clears search highlighting but keeps search mode active
+func clearLogSearchHighlighting() {
+	if logViewTextView != nil && logOriginalText != "" {
+		logViewTextView.SetText(logOriginalText)
+	}
+	logSearchMatches = []int{}
+	logSearchCurrentIdx = -1
+	updateLogSearchStatusBar()
+}
+
+// updateLogSearchStatusBar updates the status bar to show search information
+func updateLogSearchStatusBar() {
+	if logStatusBar == nil {
+		return
+	}
+
+	if logSearchActive {
+		var searchInfo string
+		if len(logSearchMatches) > 0 {
+			searchInfo = fmt.Sprintf("Search: '%s' (%d/%d matches) | 'n' next, 'N' prev, '/' search, Esc/q to exit",
+				logSearchQuery, logSearchCurrentIdx+1, len(logSearchMatches))
+		} else if logSearchQuery != "" {
+			searchInfo = fmt.Sprintf("Search: '%s' (no matches) | Esc to exit", logSearchQuery)
+		} else {
+			searchInfo = "Search mode | Enter search term, Esc to exit"
+		}
+		logStatusBar.SetText(searchInfo)
+	} else {
+		// Restore normal status bar
+		updateLogStatusBar()
+	}
 }
