@@ -1922,7 +1922,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 
 	// Help info
 	helpInfo := tview.NewTextView().
-		SetText("Keys: j/k=move, Enter=run history, r=run, a=toggle filter, b=toggle bookmarks, B=bookmark, Ctrl+G=groups, /=search, q=back, Q=quit").
+		SetText("Keys: j/k=move, Enter=run history, r=run, a=toggle running/all, b=toggle bookmarks, B=bookmark, Ctrl+G=groups, /=search, q=back, Q=quit").
 		SetTextAlign(tview.AlignLeft).
 		SetTextColor(tcell.ColorGray)
 	helpInfo.SetBackgroundColor(tcell.ColorDefault)
