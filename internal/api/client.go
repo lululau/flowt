@@ -2328,6 +2328,10 @@ func (c *Client) listPipelinesWithTokenAndStatus(organizationId string, statusLi
 
 		// Parse each pipeline item
 		for _, pipelineMap := range pipelineItems {
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Processing pipeline item: %+v", pipelineMap)
+			}
+
 			var createTime, updateTime, lastRunTime time.Time
 			if ct, ok := pipelineMap["createTime"].(float64); ok && ct > 0 {
 				createTime = time.Unix(int64(ct)/1000, 0)
@@ -2346,6 +2350,10 @@ func (c *Client) listPipelinesWithTokenAndStatus(organizationId string, statusLi
 				pipelineID = id
 			} else if id, ok := pipelineMap["pipelineId"].(float64); ok {
 				pipelineID = fmt.Sprintf("%.0f", id)
+			}
+
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Extracted pipeline ID: '%s'", pipelineID)
 			}
 
 			// Extract creator information
@@ -2385,10 +2393,29 @@ func (c *Client) listPipelinesWithTokenAndStatus(organizationId string, statusLi
 				lastRunStatus = getStringField(pipelineMap, "latestRunStatus")
 			}
 
+			// Extract pipeline status - handle cases where status field might be missing
+			pipelineStatus := getStringField(pipelineMap, "status")
+			// If status is missing but we have statusList filter, infer the status
+			if pipelineStatus == "" && len(statusList) > 0 {
+				// When filtering by status, the returned pipelines should match the filter
+				// Use the first status from the filter as a reasonable default
+				pipelineStatus = statusList[0]
+			}
+			// If still no status, use lastRunStatus as fallback
+			if pipelineStatus == "" && lastRunStatus != "" {
+				pipelineStatus = lastRunStatus
+			}
+
+			pipelineName := getStringField(pipelineMap, "name")
+
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Extracted pipeline name: '%s', status: '%s'", pipelineName, pipelineStatus)
+			}
+
 			pipeline := Pipeline{
 				PipelineID:    pipelineID,
-				Name:          getStringField(pipelineMap, "name"),
-				Status:        getStringField(pipelineMap, "status"),
+				Name:          pipelineName,
+				Status:        pipelineStatus,
 				LastRunStatus: lastRunStatus,
 				LastRunTime:   lastRunTime,
 				Creator:       creator,
@@ -2398,8 +2425,16 @@ func (c *Client) listPipelinesWithTokenAndStatus(organizationId string, statusLi
 				UpdateTime:    updateTime,
 			}
 
-			if pipeline.PipelineID != "" {
+			// Only include pipelines that have both ID and name
+			if pipeline.PipelineID != "" && pipeline.Name != "" {
 				allPipelines = append(allPipelines, pipeline)
+				if os.Getenv("FLOWT_DEBUG") == "1" {
+					debugLogger.Printf("Added pipeline: ID='%s', Name='%s', Status='%s'", pipeline.PipelineID, pipeline.Name, pipeline.Status)
+				}
+			} else {
+				if os.Getenv("FLOWT_DEBUG") == "1" {
+					debugLogger.Printf("Skipped pipeline due to missing ID or name: ID='%s', Name='%s'", pipeline.PipelineID, pipeline.Name)
+				}
 			}
 		}
 
@@ -2910,6 +2945,10 @@ func (c *Client) listPipelinesWithTokenAndCallback(organizationId string, status
 		// Parse pipelines for this page
 		var pagePipelines []Pipeline
 		for _, pipelineMap := range pipelineItems {
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Processing pipeline item: %+v", pipelineMap)
+			}
+
 			var createTime, updateTime, lastRunTime time.Time
 			if ct, ok := pipelineMap["createTime"].(float64); ok && ct > 0 {
 				createTime = time.Unix(int64(ct)/1000, 0)
@@ -2928,6 +2967,10 @@ func (c *Client) listPipelinesWithTokenAndCallback(organizationId string, status
 				pipelineID = id
 			} else if id, ok := pipelineMap["pipelineId"].(float64); ok {
 				pipelineID = fmt.Sprintf("%.0f", id)
+			}
+
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Extracted pipeline ID: '%s'", pipelineID)
 			}
 
 			// Extract creator information
@@ -2967,10 +3010,29 @@ func (c *Client) listPipelinesWithTokenAndCallback(organizationId string, status
 				lastRunStatus = getStringField(pipelineMap, "latestRunStatus")
 			}
 
+			// Extract pipeline status - handle cases where status field might be missing
+			pipelineStatus := getStringField(pipelineMap, "status")
+			// If status is missing but we have statusList filter, infer the status
+			if pipelineStatus == "" && len(statusList) > 0 {
+				// When filtering by status, the returned pipelines should match the filter
+				// Use the first status from the filter as a reasonable default
+				pipelineStatus = statusList[0]
+			}
+			// If still no status, use lastRunStatus as fallback
+			if pipelineStatus == "" && lastRunStatus != "" {
+				pipelineStatus = lastRunStatus
+			}
+
+			pipelineName := getStringField(pipelineMap, "name")
+
+			if os.Getenv("FLOWT_DEBUG") == "1" {
+				debugLogger.Printf("Extracted pipeline name: '%s', status: '%s'", pipelineName, pipelineStatus)
+			}
+
 			pipeline := Pipeline{
 				PipelineID:    pipelineID,
-				Name:          getStringField(pipelineMap, "name"),
-				Status:        getStringField(pipelineMap, "status"),
+				Name:          pipelineName,
+				Status:        pipelineStatus,
 				LastRunStatus: lastRunStatus,
 				LastRunTime:   lastRunTime,
 				Creator:       creator,
@@ -2980,8 +3042,16 @@ func (c *Client) listPipelinesWithTokenAndCallback(organizationId string, status
 				UpdateTime:    updateTime,
 			}
 
-			if pipeline.PipelineID != "" {
+			// Only include pipelines that have both ID and name
+			if pipeline.PipelineID != "" && pipeline.Name != "" {
 				pagePipelines = append(pagePipelines, pipeline)
+				if os.Getenv("FLOWT_DEBUG") == "1" {
+					debugLogger.Printf("Added pipeline: ID='%s', Name='%s', Status='%s'", pipeline.PipelineID, pipeline.Name, pipeline.Status)
+				}
+			} else {
+				if os.Getenv("FLOWT_DEBUG") == "1" {
+					debugLogger.Printf("Skipped pipeline due to missing ID or name: ID='%s', Name='%s'", pipeline.PipelineID, pipeline.Name)
+				}
 			}
 		}
 
