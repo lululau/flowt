@@ -425,30 +425,9 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 	// 1. Get pipelines based on current view mode and status filter
 	var tempFilteredByGroup []api.Pipeline
 	if currentViewMode == "pipelines_in_group" && selectedGroupID != "" {
-		// Use the correct API to get pipelines in the selected group
-		groupIdInt := 0
-		if _, err := fmt.Sscanf(selectedGroupID, "%d", &groupIdInt); err != nil {
-			// Show error if group ID is invalid
-			cell := tview.NewTableCell(fmt.Sprintf("Error: Invalid group ID '%s'", selectedGroupID)).
-				SetTextColor(tcell.ColorRed).
-				SetAlign(tview.AlignCenter)
-			table.SetCell(1, 0, cell)
-			table.SetCell(1, 1, tview.NewTableCell(""))
-			return
-		}
-
-		// Call the ListPipelineGroupPipelines API
-		groupPipelines, err := apiClient.ListPipelineGroupPipelines(orgId, groupIdInt, nil)
-		if err != nil {
-			// Show error message
-			cell := tview.NewTableCell(fmt.Sprintf("Error fetching group pipelines: %v", err)).
-				SetTextColor(tcell.ColorRed).
-				SetAlign(tview.AlignCenter)
-			table.SetCell(1, 0, cell)
-			table.SetCell(1, 1, tview.NewTableCell(""))
-			return
-		}
-		tempFilteredByGroup = groupPipelines
+		// For group pipelines, use the data loaded by the progressive loading system
+		// Don't make additional API calls here to avoid duplicate requests
+		tempFilteredByGroup = append(tempFilteredByGroup, allPipelines...)
 	} else {
 		// Use all pipelines for "all_pipelines" view
 		tempFilteredByGroup = append(tempFilteredByGroup, allPipelines...)
@@ -457,7 +436,7 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 	// 1.5. Apply client-side status filtering if using cached data
 	var tempFilteredByStatus []api.Pipeline
 	if showOnlyRunningWaiting && currentViewMode == "all_pipelines" && allPipelinesCacheLoaded {
-		// When using cached data, we need to filter on client side
+		// When using cached data for all pipelines view, we need to filter on client side
 		for _, p := range tempFilteredByGroup {
 			// Check both Status and LastRunStatus for RUNNING/WAITING
 			status := strings.ToUpper(p.Status)
@@ -467,7 +446,10 @@ func updatePipelineTable(table *tview.Table, app *tview.Application, _ *tview.In
 			}
 		}
 	} else {
-		// No client-side status filtering needed (either no filter or server-side filtered)
+		// No client-side status filtering needed for:
+		// 1. No status filter active
+		// 2. Group pipelines (server-side filtered)
+		// 3. All pipelines loaded from server with status filter
 		tempFilteredByStatus = append(tempFilteredByStatus, tempFilteredByGroup...)
 	}
 
@@ -1673,107 +1655,218 @@ func startProgressivePipelineLoadingFromServer(table *tview.Table, app *tview.Ap
 	pipelineLoadingError = nil
 	allPipelines = []api.Pipeline{} // Clear existing pipelines
 
-	// Clear table and show loading state
-	updatePipelineTable(table, app, searchInput, apiClient, orgId)
+	// Immediately clear table and show loading state to prevent showing old data
+	table.Clear()
+	headers := []string{" ", "Name"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).
+			SetTextColor(tcell.ColorYellow).
+			SetAlign(tview.AlignLeft).
+			SetSelectable(false).
+			SetBackgroundColor(tcell.ColorDefault)
+		table.SetCell(0, col, cell)
+	}
+
+	// Show loading message immediately
+	var loadingTitle string
+	if currentViewMode == "pipelines_in_group" {
+		if showOnlyRunningWaiting {
+			loadingTitle = fmt.Sprintf("Loading Pipelines in '%s' (RUNNING+WAITING)...", selectedGroupName)
+		} else {
+			loadingTitle = fmt.Sprintf("Loading Pipelines in '%s'...", selectedGroupName)
+		}
+	} else {
+		if showOnlyRunningWaiting {
+			loadingTitle = "Loading Pipelines (RUNNING+WAITING)..."
+		} else {
+			loadingTitle = "Loading All Pipelines..."
+		}
+	}
+	table.SetTitle(loadingTitle)
 
 	// Start loading in a goroutine
 	go func() {
-		var statusList []string
-		if showOnlyRunningWaiting {
-			statusList = []string{"RUNNING", "WAITING"}
-		}
-
-		// Define callback function for each page
-		callback := func(pipelines []api.Pipeline, currentPage, totalPages int, isComplete bool) error {
-			// Update loading state
-			pipelineLoadingCurrentPage = currentPage
-			pipelineLoadingTotalPages = totalPages
-
-			// Append new pipelines to the global list
-			allPipelines = append(allPipelines, pipelines...)
-
-			// Update UI on main thread
-			app.QueueUpdateDraw(func() {
-				// Update the table with new pipelines
-				updatePipelineTable(table, app, searchInput, apiClient, orgId)
-
-				// If this is the first page and table has content, select first row
-				if currentPage == 1 && table.GetRowCount() > 1 {
-					table.Select(1, 0)
-				}
-			})
-
-			// Mark as complete if this is the last page
-			if isComplete {
-				pipelineLoadingComplete = true
-				isPipelineLoadingInProgress = false
-
-				// Final UI update
-				app.QueueUpdateDraw(func() {
-					updatePipelineTable(table, app, searchInput, apiClient, orgId)
-				})
-			}
-
-			return nil
-		}
-
-		// Start the progressive loading
-		var err error
 		if currentViewMode == "pipelines_in_group" && selectedGroupID != "" {
-			// For group pipelines, we need to use a different approach
-			// since ListPipelineGroupPipelines doesn't support callback yet
+			// Handle group pipelines directly
+			pipelineLoadingCurrentPage = 1 // Reset for group view
+			pipelineLoadingTotalPages = 1  // Assume single load for group
+
 			groupIdInt := 0
 			if _, parseErr := fmt.Sscanf(selectedGroupID, "%d", &groupIdInt); parseErr != nil {
 				pipelineLoadingError = fmt.Errorf("invalid group ID '%s'", selectedGroupID)
 			} else {
-				groupPipelines, groupErr := apiClient.ListPipelineGroupPipelines(orgId, groupIdInt, nil)
+				// Prepare options for group pipeline loading
+				options := make(map[string]interface{})
+				if showOnlyRunningWaiting {
+					// Add status filter for group pipelines
+					options["statusList"] = "RUNNING,WAITING"
+				}
+
+				groupPipelines, groupErr := apiClient.ListPipelineGroupPipelines(orgId, groupIdInt, options)
 				if groupErr != nil {
 					pipelineLoadingError = groupErr
 				} else {
-					// Call callback with all group pipelines as a single page
-					callback(groupPipelines, 1, 1, true)
+					allPipelines = groupPipelines // Direct assignment
+					pipelineLoadingComplete = true
+					isPipelineLoadingInProgress = false
+					// Update UI on main thread
+					app.QueueUpdateDraw(func() {
+						updatePipelineTable(table, app, searchInput, apiClient, orgId)
+						if table.GetRowCount() > 1 {
+							table.Select(1, 0)
+						}
+					})
 				}
+			}
+
+			if pipelineLoadingError != nil {
+				isPipelineLoadingInProgress = false
+				pipelineLoadingComplete = false // Loading did not complete successfully
+				app.QueueUpdateDraw(func() {
+					table.Clear()
+					headers := []string{" ", "Name"}
+					for col, header := range headers {
+						cell := tview.NewTableCell(header).
+							SetTextColor(tcell.ColorYellow).
+							SetAlign(tview.AlignLeft).
+							SetSelectable(false).
+							SetBackgroundColor(tcell.ColorDefault)
+						table.SetCell(0, col, cell)
+					}
+					cell := tview.NewTableCell(fmt.Sprintf("Error loading pipelines for group: %v", pipelineLoadingError)).
+						SetTextColor(tcell.ColorRed).
+						SetAlign(tview.AlignCenter)
+					table.SetCell(1, 0, cell)
+					// Clear other cells in the row
+					for i := 1; i < len(headers); i++ {
+						table.SetCell(1, i, tview.NewTableCell(""))
+					}
+					table.SetTitle(fmt.Sprintf("Error Loading Pipelines for Group '%s'", selectedGroupName))
+				})
 			}
 		} else {
-			// Use the new callback-based API for all pipelines
-			if len(statusList) > 0 {
-				err = apiClient.ListPipelinesWithStatusAndCallback(orgId, statusList, callback)
-			} else {
-				err = apiClient.ListPipelinesWithCallback(orgId, callback)
-			}
-		}
-
-		// Handle any errors
-		if err != nil || pipelineLoadingError != nil {
-			finalErr := err
-			if pipelineLoadingError != nil {
-				finalErr = pipelineLoadingError
+			// Original logic for "all pipelines" (possibly filtered by status)
+			var statusList []string
+			if showOnlyRunningWaiting {
+				statusList = []string{"RUNNING", "WAITING"}
 			}
 
-			isPipelineLoadingInProgress = false
-			pipelineLoadingComplete = false
+			// Define callback function for each page
+			callback := func(pipelines []api.Pipeline, currentPage, totalPages int, isComplete bool) error {
+				// Update loading state
+				pipelineLoadingCurrentPage = currentPage
+				pipelineLoadingTotalPages = totalPages
 
-			app.QueueUpdateDraw(func() {
-				// Show error in table
-				table.Clear()
-				headers := []string{" ", "Name"}
-				for col, header := range headers {
-					cell := tview.NewTableCell(header).
-						SetTextColor(tcell.ColorYellow).
-						SetAlign(tview.AlignLeft).
-						SetSelectable(false).
-						SetBackgroundColor(tcell.ColorDefault)
-					table.SetCell(0, col, cell)
+				// Append new pipelines to the global list
+				allPipelines = append(allPipelines, pipelines...)
+
+				// Update UI on main thread
+				app.QueueUpdateDraw(func() {
+					// Update the table with new pipelines
+					updatePipelineTable(table, app, searchInput, apiClient, orgId)
+
+					// If this is the first page and table has content, select first row
+					if currentPage == 1 && table.GetRowCount() > 1 {
+						table.Select(1, 0)
+					}
+				})
+
+				// Mark as complete if this is the last page
+				if isComplete {
+					pipelineLoadingComplete = true
+					isPipelineLoadingInProgress = false
+
+					// Final UI update - only update title, no need to rebuild entire table
+					app.QueueUpdateDraw(func() {
+						// Just update the title to show completion status
+						var title string
+						if currentViewMode == "pipelines_in_group" {
+							if showOnlyBookmarked {
+								title = fmt.Sprintf("Pipelines in '%s' (BOOKMARKED)", selectedGroupName)
+							} else if showOnlyRunningWaiting {
+								title = fmt.Sprintf("Pipelines in '%s' (RUNNING+WAITING)", selectedGroupName)
+							} else {
+								title = fmt.Sprintf("Pipelines in '%s'", selectedGroupName)
+							}
+						} else {
+							if showOnlyBookmarked {
+								title = "Pipelines (BOOKMARKED)"
+							} else if showOnlyRunningWaiting {
+								title = "Pipelines (RUNNING+WAITING)"
+							} else {
+								title = "All Pipelines"
+							}
+						}
+						title += fmt.Sprintf(" (%d pipelines)", len(allPipelines))
+						table.SetTitle(title)
+					})
 				}
 
-				cell := tview.NewTableCell(fmt.Sprintf("Error loading pipelines: %v", finalErr)).
-					SetTextColor(tcell.ColorRed).
-					SetAlign(tview.AlignCenter)
-				table.SetCell(1, 0, cell)
-				table.SetCell(1, 1, tview.NewTableCell(""))
+				return nil
+			}
 
-				table.SetTitle("Error Loading Pipelines")
-			})
+			// Start the progressive loading
+			var err error
+			if currentViewMode == "pipelines_in_group" && selectedGroupID != "" {
+				// For group pipelines, we need to use a different approach
+				// since ListPipelineGroupPipelines doesn't support callback yet
+				// THIS PATH SHOULD NOT BE HIT ANYMORE DUE TO THE OUTER IF/ELSE
+				// BUT KEPT FOR STRUCTURAL SIMILARITY TO ORIGINAL BEFORE REFACTOR
+				groupIdInt := 0
+				if _, parseErr := fmt.Sscanf(selectedGroupID, "%d", &groupIdInt); parseErr != nil {
+					pipelineLoadingError = fmt.Errorf("invalid group ID '%s'", selectedGroupID)
+				} else {
+					groupPipelines, groupErr := apiClient.ListPipelineGroupPipelines(orgId, groupIdInt, nil)
+					if groupErr != nil {
+						pipelineLoadingError = groupErr
+					} else {
+						// Call callback with all group pipelines as a single page
+						err = callback(groupPipelines, 1, 1, true)
+					}
+				}
+			} else {
+				// Use the new callback-based API for all pipelines
+				if len(statusList) > 0 {
+					err = apiClient.ListPipelinesWithStatusAndCallback(orgId, statusList, callback)
+				} else {
+					err = apiClient.ListPipelinesWithCallback(orgId, callback)
+				}
+			}
+
+			// Handle any errors
+			// Note: pipelineLoadingError is for the group-specific loading path in the outer 'if'
+			// 'err' here is for the general callback-based loading
+			if err != nil || pipelineLoadingError != nil {
+				finalErr := err
+				if pipelineLoadingError != nil { // Should ideally not happen if err is also present from this path
+					finalErr = pipelineLoadingError
+				}
+
+				isPipelineLoadingInProgress = false
+				pipelineLoadingComplete = false
+
+				app.QueueUpdateDraw(func() {
+					// Show error in table
+					table.Clear()
+					headers := []string{" ", "Name"}
+					for col, header := range headers {
+						cell := tview.NewTableCell(header).
+							SetTextColor(tcell.ColorYellow).
+							SetAlign(tview.AlignLeft).
+							SetSelectable(false).
+							SetBackgroundColor(tcell.ColorDefault)
+						table.SetCell(0, col, cell)
+					}
+
+					cell := tview.NewTableCell(fmt.Sprintf("Error loading pipelines: %v", finalErr)).
+						SetTextColor(tcell.ColorRed).
+						SetAlign(tview.AlignCenter)
+					table.SetCell(1, 0, cell)
+					table.SetCell(1, 1, tview.NewTableCell(""))
+
+					table.SetTitle("Error Loading Pipelines")
+				})
+			}
 		}
 	}()
 }
@@ -1972,6 +2065,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			if currentSearchQuery != "" {
 				currentSearchQuery = ""
 				searchInput.SetText("")
+				// For search clear, we can just update the table without reloading data
 				updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 				// app.SetFocus(pipelineTable) // Already focused or will be by searchInput.SetDoneFunc
 			}
@@ -1989,6 +2083,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			return nil
 		case 'b': // Toggle bookmark filter
 			showOnlyBookmarked = !showOnlyBookmarked
+			// For bookmark filter, we can just update the table without reloading data
 			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			return nil
 		case 'B': // Toggle bookmark for current pipeline
@@ -2000,7 +2095,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 						if err := globalSaveConfig(); err != nil {
 							ShowModal("Error", fmt.Sprintf("Failed to save bookmark: %v", err), []string{"OK"}, nil)
 						}
-						// Refresh table to update bookmark indicators
+						// Refresh table to update bookmark indicators (no API call needed)
 						updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 					}
 				}
@@ -2040,6 +2135,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 	// --- Event Handlers for searchInput ---
 	searchInput.SetChangedFunc(func(text string) {
 		currentSearchQuery = text
+		// For search filtering, we can just update the table without reloading data
 		updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 	})
 	searchInput.SetDoneFunc(func(key tcell.Key) {
@@ -2048,6 +2144,7 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 		} else if key == tcell.KeyEscape {
 			currentSearchQuery = ""
 			searchInput.SetText("")
+			// For search clear, we can just update the table without reloading data
 			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
 			app.SetFocus(pipelineTable)
 		}
@@ -2113,7 +2210,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			selectedGroupName = ""
 			currentGroupSearchQuery = ""
 			groupSearchInput.SetText("")
-			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
+			// Use progressive loading to switch back to all pipelines view
+			startProgressivePipelineLoading(pipelineTable, app, searchInput, apiClient, orgId)
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
 			return nil
@@ -2143,7 +2241,8 @@ func NewMainView(app *tview.Application, apiClient *api.Client, orgId string) tv
 			selectedGroupName = ""
 			currentGroupSearchQuery = ""
 			groupSearchInput.SetText("")
-			updatePipelineTable(pipelineTable, app, searchInput, apiClient, orgId)
+			// Use progressive loading to switch back to all pipelines view
+			startProgressivePipelineLoading(pipelineTable, app, searchInput, apiClient, orgId)
 			mainPages.SwitchToPage("pipelines")
 			app.SetFocus(pipelineTable)
 			return nil
